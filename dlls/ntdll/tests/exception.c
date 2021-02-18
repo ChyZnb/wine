@@ -850,16 +850,13 @@ static const BYTE align_check_code[] = {
     0x55,                  	/* push   %ebp */
     0x89,0xe5,             	/* mov    %esp,%ebp */
     0x9c,                  	/* pushf   */
+    0x9c,                  	/* pushf   */
     0x58,                  	/* pop    %eax */
     0x0d,0,0,4,0,       	/* or     $0x40000,%eax */
     0x50,                  	/* push   %eax */
     0x9d,                  	/* popf    */
     0x89,0xe0,                  /* mov %esp, %eax */
     0x8b,0x40,0x1,              /* mov 0x1(%eax), %eax - cause exception */
-    0x9c,                  	/* pushf   */
-    0x58,                  	/* pop    %eax */
-    0x35,0,0,4,0,       	/* xor    $0x40000,%eax */
-    0x50,                  	/* push   %eax */
     0x9d,                  	/* popf    */
     0x5d,                  	/* pop    %ebp */
     0xc3,                  	/* ret     */
@@ -1056,7 +1053,7 @@ static void test_exceptions(void)
     ok( res == STATUS_SUCCESS, "NtSetContextThread failed with %x\n", res );
 }
 
-static void test_debugger(void)
+static void test_debugger(DWORD cont_status)
 {
     char cmdline[MAX_PATH];
     PROCESS_INFORMATION pi;
@@ -1084,7 +1081,7 @@ static void test_debugger(void)
 
     do
     {
-        continuestatus = DBG_CONTINUE;
+        continuestatus = cont_status;
         ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
 
         ret = ContinueDebugEvent(de.dwProcessId, de.dwThreadId, 0xdeadbeef);
@@ -1094,7 +1091,7 @@ static void test_debugger(void)
         if (de.dwThreadId != pi.dwThreadId)
         {
             trace("event %d not coming from main thread, ignoring\n", de.dwDebugEventCode);
-            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
+            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, cont_status);
             continue;
         }
 
@@ -3291,7 +3288,7 @@ static void test_rtlraiseexception(void)
     run_rtlraiseexception_test(EXCEPTION_INVALID_HANDLE);
 }
 
-static void test_debugger(void)
+static void test_debugger(DWORD cont_status)
 {
     char cmdline[MAX_PATH];
     PROCESS_INFORMATION pi;
@@ -3319,7 +3316,7 @@ static void test_debugger(void)
 
     do
     {
-        continuestatus = DBG_CONTINUE;
+        continuestatus = cont_status;
         ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
 
         ret = ContinueDebugEvent(de.dwProcessId, de.dwThreadId, 0xdeadbeef);
@@ -3329,7 +3326,7 @@ static void test_debugger(void)
         if (de.dwThreadId != pi.dwThreadId)
         {
             trace("event %d not coming from main thread, ignoring\n", de.dwDebugEventCode);
-            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
+            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, cont_status);
             continue;
         }
 
@@ -3870,22 +3867,20 @@ static void test_kiuserexceptiondispatcher(void)
         0x48, 0x8d, 0x8c, 0x24, 0xf0, 0x04, 0x00, 0x00,
                                     /* lea 0x4f0(%rsp),%rcx */
         0x4c, 0x89, 0x22,           /* mov %r12,(%rdx) */
-        0xff, 0x14, 0x25,
-        /* offset: 17 bytes */
-        0x00, 0x00, 0x00, 0x00,     /* callq *addr */ /* call hook implementation. */
+        0x48, 0xb8,                 /* movabs hook_KiUserExceptionDispatcher,%rax */
+        0,0,0,0,0,0,0,0,            /* offset 16 */
+        0xff, 0xd0,                 /* callq *rax */
         0x48, 0x31, 0xc9,           /* xor %rcx, %rcx */
         0x48, 0x31, 0xd2,           /* xor %rdx, %rdx */
-
-        0xff, 0x24, 0x25,
-        /* offset: 30 bytes */
-        0x00, 0x00, 0x00, 0x00,     /* jmpq *addr */ /* jump to original function. */
+        0x48, 0xb8,                 /* movabs pKiUserExceptionDispatcher,%rax */
+        0,0,0,0,0,0,0,0,            /* offset 34 */
+        0xff, 0xe0,                 /* jmpq *rax */
     };
 
-    void *phook_KiUserExceptionDispatcher = hook_KiUserExceptionDispatcher;
     BYTE patched_KiUserExceptionDispatcher_bytes[12];
-    DWORD old_protect1, old_protect2;
+    void *bpt_address, *trampoline_ptr;
     EXCEPTION_RECORD record;
-    void *bpt_address;
+    DWORD old_protect;
     CONTEXT ctx;
     LONG pass;
     BYTE *ptr;
@@ -3901,19 +3896,14 @@ static void test_kiuserexceptiondispatcher(void)
     *(ULONG64 *)(except_code + 2) = (ULONG64)&test_kiuserexceptiondispatcher_regs;
     *(ULONG64 *)(except_code + 0x2a) = (ULONG64)&test_kiuserexceptiondispatcher_regs.new_rax;
 
-    ok(((ULONG64)&phook_KiUserExceptionDispatcher & 0xffffffff) == ((ULONG64)&phook_KiUserExceptionDispatcher),
-            "Address is too long.\n");
-    ok(((ULONG64)&pKiUserExceptionDispatcher & 0xffffffff) == ((ULONG64)&pKiUserExceptionDispatcher),
-            "Address is too long.\n");
-
-    *(unsigned int *)(hook_trampoline + 17) = (unsigned int)(ULONG_PTR)&phook_KiUserExceptionDispatcher;
-    *(unsigned int *)(hook_trampoline + 30) = (unsigned int)(ULONG_PTR)&pKiUserExceptionDispatcher;
-
-    ret = VirtualProtect(hook_trampoline, ARRAY_SIZE(hook_trampoline), PAGE_EXECUTE_READWRITE, &old_protect1);
-    ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
+    *(ULONG_PTR *)(hook_trampoline + 16) = (ULONG_PTR)hook_KiUserExceptionDispatcher;
+    *(ULONG_PTR *)(hook_trampoline + 34) = (ULONG_PTR)pKiUserExceptionDispatcher;
+    trampoline_ptr = (char *)code_mem + 1024;
+    memcpy(trampoline_ptr, hook_trampoline, sizeof(hook_trampoline));
+    ok(((ULONG64)trampoline_ptr & 0xffffffff) == (ULONG64)trampoline_ptr, "Address is too long.\n");
 
     ret = VirtualProtect(pKiUserExceptionDispatcher, sizeof(saved_KiUserExceptionDispatcher_bytes),
-            PAGE_EXECUTE_READWRITE, &old_protect2);
+            PAGE_EXECUTE_READWRITE, &old_protect);
     ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
 
     memcpy(saved_KiUserExceptionDispatcher_bytes, pKiUserExceptionDispatcher,
@@ -3922,7 +3912,7 @@ static void test_kiuserexceptiondispatcher(void)
     /* mov hook_trampoline, %rax */
     *ptr++ = 0x48;
     *ptr++ = 0xb8;
-    *(void **)ptr = hook_trampoline;
+    *(void **)ptr = trampoline_ptr;
     ptr += sizeof(ULONG64);
     /* jmp *rax */
     *ptr++ = 0xff;
@@ -4045,9 +4035,7 @@ static void test_kiuserexceptiondispatcher(void)
     RemoveVectoredExceptionHandler(vectored_handler);
 
     ret = VirtualProtect(pKiUserExceptionDispatcher, sizeof(saved_KiUserExceptionDispatcher_bytes),
-            old_protect2, &old_protect2);
-    ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
-    ret = VirtualProtect(hook_trampoline, ARRAY_SIZE(hook_trampoline), old_protect1, &old_protect1);
+            old_protect, &old_protect);
     ok(ret, "Got unexpected ret %#x, GetLastError() %u.\n", ret, GetLastError());
 }
 
@@ -4255,7 +4243,7 @@ static void test_thread_context(void)
 #undef COMPARE
 }
 
-static void test_debugger(void)
+static void test_debugger(DWORD cont_status)
 {
     char cmdline[MAX_PATH];
     PROCESS_INFORMATION pi;
@@ -4283,7 +4271,7 @@ static void test_debugger(void)
 
     do
     {
-        continuestatus = DBG_CONTINUE;
+        continuestatus = cont_status;
         ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
 
         ret = ContinueDebugEvent(de.dwProcessId, de.dwThreadId, 0xdeadbeef);
@@ -4293,7 +4281,7 @@ static void test_debugger(void)
         if (de.dwThreadId != pi.dwThreadId)
         {
             trace("event %d not coming from main thread, ignoring\n", de.dwDebugEventCode);
-            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
+            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, cont_status);
             continue;
         }
 
@@ -5503,7 +5491,7 @@ static void test_thread_context(void)
 #undef COMPARE
 }
 
-static void test_debugger(void)
+static void test_debugger(DWORD cont_status)
 {
     char cmdline[MAX_PATH];
     PROCESS_INFORMATION pi;
@@ -5531,7 +5519,7 @@ static void test_debugger(void)
 
     do
     {
-        continuestatus = DBG_CONTINUE;
+        continuestatus = cont_status;
         ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
 
         ret = ContinueDebugEvent(de.dwProcessId, de.dwThreadId, 0xdeadbeef);
@@ -5541,7 +5529,7 @@ static void test_debugger(void)
         if (de.dwThreadId != pi.dwThreadId)
         {
             trace("event %d not coming from main thread, ignoring\n", de.dwDebugEventCode);
-            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
+            ContinueDebugEvent(de.dwProcessId, de.dwThreadId, cont_status);
             continue;
         }
 
@@ -8349,7 +8337,8 @@ START_TEST(exception)
 
 #endif
 
-    test_debugger();
+    test_debugger(DBG_EXCEPTION_HANDLED);
+    test_debugger(DBG_CONTINUE);
     test_thread_context();
     test_outputdebugstring(1, FALSE);
     test_ripevent(1);

@@ -195,6 +195,14 @@ static void set_tty_cursor( struct console *console, unsigned int x, unsigned in
     else if (!x && y == console->tty_cursor_y) strcpy( buf, "\r" );
     else if (y == console->tty_cursor_y)
     {
+        if (console->is_unix && console->tty_cursor_x >= console->active->width)
+        {
+            /* Unix will usually have the cursor at width-1 in this case. instead of depending
+             * on the exact behaviour, move the cursor to the first column and move forward
+             * from threre. */
+            tty_write( console, "\r", 1 );
+            console->tty_cursor_x = 0;
+        }
         if (x + 1 == console->tty_cursor_x) strcpy( buf, "\b" );
         else if (x > console->tty_cursor_x) sprintf( buf, "\x1b[%uC", x - console->tty_cursor_x );
         else sprintf( buf, "\x1b[%uD", console->tty_cursor_x - x );
@@ -691,6 +699,7 @@ static void edit_line_find_in_history( struct console *console )
     unsigned int len, oldoffset;
     WCHAR *line;
 
+    if (!console->history_index) return;
     if (ctx->history_index && ctx->history_index == console->history_index)
     {
         start_pos--;
@@ -699,28 +708,28 @@ static void edit_line_find_in_history( struct console *console )
 
     do
     {
-       line = edit_line_history(console, ctx->history_index);
+        line = edit_line_history(console, ctx->history_index);
 
-       if (ctx->history_index) ctx->history_index--;
-       else ctx->history_index = console->history_index;
+        if (ctx->history_index) ctx->history_index--;
+        else ctx->history_index = console->history_index - 1;
 
-       len = lstrlenW(line) + 1;
-       if (len >= ctx->cursor && !memcmp( ctx->buf, line, ctx->cursor * sizeof(WCHAR) ))
-       {
-           /* need to clean also the screen if new string is shorter than old one */
-           edit_line_delete(console, 0, ctx->len);
+        len = lstrlenW(line) + 1;
+        if (len >= ctx->cursor && !memcmp( ctx->buf, line, ctx->cursor * sizeof(WCHAR) ))
+        {
+            /* need to clean also the screen if new string is shorter than old one */
+            edit_line_delete(console, 0, ctx->len);
 
-           if (edit_line_grow(console, len))
-           {
-              oldoffset = ctx->cursor;
-              ctx->cursor = 0;
-              edit_line_insert( console, line, len - 1 );
-              ctx->cursor = oldoffset;
-              free(line);
-              return;
-           }
-       }
-       free(line);
+            if (edit_line_grow(console, len))
+            {
+                oldoffset = ctx->cursor;
+                ctx->cursor = 0;
+                edit_line_insert( console, line, len - 1 );
+                ctx->cursor = oldoffset;
+                free(line);
+                return;
+            }
+        }
+        free(line);
     }
     while (ctx->history_index != start_pos);
 }
@@ -1734,6 +1743,18 @@ static NTSTATUS get_output_info( struct screen_buffer *screen_buffer, size_t *ou
     return STATUS_SUCCESS;
 }
 
+void notify_screen_buffer_size( struct screen_buffer *screen_buffer )
+{
+    if (is_active( screen_buffer ) && screen_buffer->console->mode & ENABLE_WINDOW_INPUT)
+    {
+        INPUT_RECORD ir;
+        ir.EventType = WINDOW_BUFFER_SIZE_EVENT;
+        ir.Event.WindowBufferSizeEvent.dwSize.X = screen_buffer->width;
+        ir.Event.WindowBufferSizeEvent.dwSize.Y = screen_buffer->height;
+        write_console_input( screen_buffer->console, &ir, 1, TRUE );
+    }
+}
+
 NTSTATUS change_screen_buffer_size( struct screen_buffer *screen_buffer, int new_width, int new_height )
 {
     int i, old_width, old_height, copy_width, copy_height;
@@ -1838,14 +1859,7 @@ static NTSTATUS set_output_info( struct screen_buffer *screen_buffer,
         if (screen_buffer->cursor_x >= info->width)  screen_buffer->cursor_x = info->width - 1;
         if (screen_buffer->cursor_y >= info->height) screen_buffer->cursor_y = info->height - 1;
 
-        if (is_active( screen_buffer ) && screen_buffer->console->mode & ENABLE_WINDOW_INPUT)
-        {
-            INPUT_RECORD ir;
-            ir.EventType = WINDOW_BUFFER_SIZE_EVENT;
-            ir.Event.WindowBufferSizeEvent.dwSize.X = info->width;
-            ir.Event.WindowBufferSizeEvent.dwSize.Y = info->height;
-            write_console_input( screen_buffer->console, &ir, 1, TRUE );
-        }
+        notify_screen_buffer_size( screen_buffer );
     }
     if (params->mask & SET_CONSOLE_OUTPUT_INFO_ATTR)
     {
@@ -2674,6 +2688,14 @@ static int main_loop( struct console *console, HANDLE signal )
     return 0;
 }
 
+static LONG WINAPI handle_ctrl_c( EXCEPTION_POINTERS *eptr )
+{
+    if (eptr->ExceptionRecord->ExceptionCode != CONTROL_C_EXIT) return EXCEPTION_CONTINUE_SEARCH;
+    /* In Unix mode, ignore ctrl c exceptions. Signals are sent it to clients as well and we will
+     * terminate the usual way if they don't handle it. */
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 int __cdecl wmain(int argc, WCHAR *argv[])
 {
     int headless = 0, i, width = 0, height = 0;
@@ -2762,6 +2784,8 @@ int __cdecl wmain(int argc, WCHAR *argv[])
         set_console_title( &console, si.lpTitle, wcslen( si.lpTitle ) * sizeof(WCHAR) );
         ShowWindow( console.win, (si.dwFlags & STARTF_USESHOWWINDOW) ? si.wShowWindow : SW_SHOW );
     }
+
+    if (console.is_unix) RtlAddVectoredExceptionHandler( FALSE, handle_ctrl_c );
 
     return main_loop( &console, signal );
 }

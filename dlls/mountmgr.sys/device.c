@@ -91,6 +91,7 @@ struct disk_device
     char                 *unix_device; /* unix device path */
     char                 *unix_mount;  /* unix mount point path */
     char                 *serial;      /* disk serial number */
+    struct volume        *volume;      /* associated volume */
 };
 
 struct volume
@@ -746,7 +747,7 @@ static DWORD VOLUME_GetAudioCDSerial( const CDROM_TOC *toc )
 
 
 /* create the disk device for a given volume */
-static NTSTATUS create_disk_device( enum device_type type, struct disk_device **device_ret )
+static NTSTATUS create_disk_device( enum device_type type, struct disk_device **device_ret, struct volume *volume )
 {
     static const WCHAR harddiskvolW[] = {'\\','D','e','v','i','c','e',
                                          '\\','H','a','r','d','d','i','s','k','V','o','l','u','m','e','%','u',0};
@@ -808,6 +809,7 @@ static NTSTATUS create_disk_device( enum device_type type, struct disk_device **
         device->unix_device    = NULL;
         device->unix_mount     = NULL;
         device->symlink.Buffer = NULL;
+        device->volume         = volume;
 
         if (link_format)
         {
@@ -930,7 +932,7 @@ static NTSTATUS create_volume( const char *udi, enum device_type type, struct vo
     if (!(volume = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*volume) )))
         return STATUS_NO_MEMORY;
 
-    if (!(status = create_disk_device( type, &volume->device )))
+    if (!(status = create_disk_device( type, &volume->device, volume )))
     {
         if (udi) set_volume_udi( volume, udi );
         list_add_tail( &volumes_list, &volume->entry );
@@ -1125,7 +1127,7 @@ static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive,
 
     if (type != disk_device->type)
     {
-        if ((status = create_disk_device( type, &disk_device ))) return status;
+        if ((status = create_disk_device( type, &disk_device, volume ))) return status;
         if (volume->mount)
         {
             delete_mount_point( volume->mount );
@@ -1752,23 +1754,22 @@ NTSTATUS query_unix_device( ULONGLONG unix_dev, enum device_type *type,
     return status;
 }
 
-static void query_property( struct disk_device *device, IRP *irp )
+static NTSTATUS query_property( struct disk_device *device, IRP *irp )
 {
     IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation( irp );
     STORAGE_PROPERTY_QUERY *query = irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS status;
 
     if (!irp->AssociatedIrp.SystemBuffer
         || irpsp->Parameters.DeviceIoControl.InputBufferLength < sizeof(STORAGE_PROPERTY_QUERY))
     {
-        irp->IoStatus.u.Status = STATUS_INVALID_PARAMETER;
-        return;
+        return STATUS_INVALID_PARAMETER;
     }
 
     /* Try to persuade application not to check property */
     if (query->QueryType == PropertyExistsQuery)
     {
-        irp->IoStatus.u.Status = STATUS_NOT_SUPPORTED;
-        return;
+        return STATUS_NOT_SUPPORTED;
     }
 
     switch (query->PropertyId)
@@ -1781,14 +1782,14 @@ static void query_property( struct disk_device *device, IRP *irp )
         if (device->serial) len += strlen( device->serial ) + 1;
 
         if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(STORAGE_DESCRIPTOR_HEADER))
-            irp->IoStatus.u.Status = STATUS_INVALID_PARAMETER;
+            status = STATUS_INVALID_PARAMETER;
         else if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < len)
         {
             descriptor = irp->AssociatedIrp.SystemBuffer;
             descriptor->Version = sizeof(STORAGE_DEVICE_DESCRIPTOR);
             descriptor->Size = len;
             irp->IoStatus.Information = sizeof(STORAGE_DESCRIPTOR_HEADER);
-            irp->IoStatus.u.Status = STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
         }
         else
         {
@@ -1814,16 +1815,129 @@ static void query_property( struct disk_device *device, IRP *irp )
                 strcpy( (char *)descriptor + descriptor->SerialNumberOffset, device->serial );
             }
             irp->IoStatus.Information = len;
-            irp->IoStatus.u.Status = STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
         }
 
         break;
     }
     default:
         FIXME( "Unsupported property %#x\n", query->PropertyId );
-        irp->IoStatus.u.Status = STATUS_NOT_SUPPORTED;
+        status = STATUS_NOT_SUPPORTED;
         break;
     }
+    return status;
+}
+
+static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
+{
+    IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation( irp );
+    int info_class = irpsp->Parameters.QueryVolume.FsInformationClass;
+    ULONG length = irpsp->Parameters.QueryVolume.Length;
+    struct disk_device *dev = device->DeviceExtension;
+    PIO_STATUS_BLOCK io = &irp->IoStatus;
+    struct volume *volume;
+    NTSTATUS status;
+
+    TRACE( "volume query %x length %u\n", info_class, length );
+
+    EnterCriticalSection( &device_section );
+    volume = dev->volume;
+    if (!volume)
+    {
+        status = STATUS_BAD_DEVICE_TYPE;
+        goto done;
+    }
+
+    switch(info_class)
+    {
+    case FileFsVolumeInformation:
+    {
+
+        FILE_FS_VOLUME_INFORMATION *info = irp->AssociatedIrp.SystemBuffer;
+
+        if (length < sizeof(FILE_FS_VOLUME_INFORMATION))
+        {
+            status = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        }
+
+        info->VolumeCreationTime.QuadPart = 0; /* FIXME */
+        info->VolumeSerialNumber = volume->serial;
+        info->VolumeLabelLength = min( strlenW(volume->label) * sizeof(WCHAR),
+                                       length - offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) );
+        info->SupportsObjects = (get_mountmgr_fs_type(volume->fs_type) == MOUNTMGR_FS_TYPE_NTFS);
+        memcpy( info->VolumeLabel, volume->label, info->VolumeLabelLength );
+
+        io->Information = offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) + info->VolumeLabelLength;
+        status = STATUS_SUCCESS;
+        break;
+    }
+    case FileFsAttributeInformation:
+    {
+        static const WCHAR fatW[] = {'F','A','T'};
+        static const WCHAR fat32W[] = {'F','A','T','3','2'};
+        static const WCHAR ntfsW[] = {'N','T','F','S'};
+        static const WCHAR cdfsW[] = {'C','D','F','S'};
+        static const WCHAR udfW[] = {'U','D','F'};
+
+        FILE_FS_ATTRIBUTE_INFORMATION *info = irp->AssociatedIrp.SystemBuffer;
+        enum mountmgr_fs_type fs_type = get_mountmgr_fs_type(volume->fs_type);
+
+        if (length < sizeof(FILE_FS_ATTRIBUTE_INFORMATION))
+        {
+            status = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        }
+
+        switch (fs_type)
+        {
+        case MOUNTMGR_FS_TYPE_ISO9660:
+            info->FileSystemAttributes = FILE_READ_ONLY_VOLUME;
+            info->MaximumComponentNameLength = 221;
+            info->FileSystemNameLength = min( sizeof(cdfsW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+            memcpy(info->FileSystemName, cdfsW, info->FileSystemNameLength);
+            break;
+        case MOUNTMGR_FS_TYPE_UDF:
+            info->FileSystemAttributes = FILE_READ_ONLY_VOLUME | FILE_UNICODE_ON_DISK | FILE_CASE_SENSITIVE_SEARCH;
+            info->MaximumComponentNameLength = 255;
+            info->FileSystemNameLength = min( sizeof(udfW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+            memcpy(info->FileSystemName, udfW, info->FileSystemNameLength);
+            break;
+        case MOUNTMGR_FS_TYPE_FAT:
+            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES; /* FIXME */
+            info->MaximumComponentNameLength = 255;
+            info->FileSystemNameLength = min( sizeof(fatW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+            memcpy(info->FileSystemName, fatW, info->FileSystemNameLength);
+            break;
+        case MOUNTMGR_FS_TYPE_FAT32:
+            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES; /* FIXME */
+            info->MaximumComponentNameLength = 255;
+            info->FileSystemNameLength = min( sizeof(fat32W), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+            memcpy(info->FileSystemName, fat32W, info->FileSystemNameLength);
+            break;
+        default:
+            info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS;
+            info->MaximumComponentNameLength = 255;
+            info->FileSystemNameLength = min( sizeof(ntfsW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
+            memcpy(info->FileSystemName, ntfsW, info->FileSystemNameLength);
+            break;
+        }
+
+        io->Information = offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) + info->FileSystemNameLength;
+        status = STATUS_SUCCESS;
+        break;
+    }
+    default:
+        FIXME("Unsupported volume query %x\n", irpsp->Parameters.QueryVolume.FsInformationClass);
+        status = STATUS_NOT_SUPPORTED;
+        break;
+    }
+
+done:
+    io->u.Status = status;
+    LeaveCriticalSection( &device_section );
+    IoCompleteRequest( irp, IO_NO_INCREMENT );
+    return status;
 }
 
 /* handler for ioctls on the harddisk device */
@@ -1831,6 +1945,7 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
 {
     IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation( irp );
     struct disk_device *dev = device->DeviceExtension;
+    NTSTATUS status;
 
     TRACE( "ioctl %x insize %u outsize %u\n",
            irpsp->Parameters.DeviceIoControl.IoControlCode,
@@ -1853,7 +1968,7 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
         info.BytesPerSector = 512;
         memcpy( irp->AssociatedIrp.SystemBuffer, &info, len );
         irp->IoStatus.Information = len;
-        irp->IoStatus.u.Status = STATUS_SUCCESS;
+        status = STATUS_SUCCESS;
         break;
     }
     case IOCTL_DISK_GET_DRIVE_GEOMETRY_EX:
@@ -1873,7 +1988,7 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
         info.Data[0]  = 0;
         memcpy( irp->AssociatedIrp.SystemBuffer, &info, len );
         irp->IoStatus.Information = len;
-        irp->IoStatus.u.Status = STATUS_SUCCESS;
+        status = STATUS_SUCCESS;
         break;
     }
     case IOCTL_STORAGE_GET_DEVICE_NUMBER:
@@ -1882,11 +1997,11 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
 
         memcpy( irp->AssociatedIrp.SystemBuffer, &dev->devnum, len );
         irp->IoStatus.Information = len;
-        irp->IoStatus.u.Status = STATUS_SUCCESS;
+        status = STATUS_SUCCESS;
         break;
     }
     case IOCTL_CDROM_READ_TOC:
-        irp->IoStatus.u.Status = STATUS_INVALID_DEVICE_REQUEST;
+        status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
     {
@@ -1895,25 +2010,26 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
         FIXME( "returning zero-filled buffer for IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS\n" );
         memset( irp->AssociatedIrp.SystemBuffer, 0, len );
         irp->IoStatus.Information = len;
-        irp->IoStatus.u.Status = STATUS_SUCCESS;
+        status = STATUS_SUCCESS;
         break;
     }
     case IOCTL_STORAGE_QUERY_PROPERTY:
-        query_property( dev, irp );
+        status = query_property( dev, irp );
         break;
     default:
     {
         ULONG code = irpsp->Parameters.DeviceIoControl.IoControlCode;
         FIXME("Unsupported ioctl %x (device=%x access=%x func=%x method=%x)\n",
               code, code >> 16, (code >> 14) & 3, (code >> 2) & 0xfff, code & 3);
-        irp->IoStatus.u.Status = STATUS_NOT_SUPPORTED;
+        status = STATUS_NOT_SUPPORTED;
         break;
     }
     }
 
+    irp->IoStatus.u.Status = status;
     LeaveCriticalSection( &device_section );
     IoCompleteRequest( irp, IO_NO_INCREMENT );
-    return STATUS_SUCCESS;
+    return status;
 }
 
 /* driver entry point for the harddisk driver */
@@ -1923,9 +2039,10 @@ NTSTATUS WINAPI harddisk_driver_entry( DRIVER_OBJECT *driver, UNICODE_STRING *pa
 
     harddisk_driver = driver;
     driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = harddisk_ioctl;
+    driver->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = harddisk_query_volume;
 
     /* create a harddisk0 device that isn't assigned to any drive */
-    create_disk_device( DEVICE_HARDDISK, &device );
+    create_disk_device( DEVICE_HARDDISK, &device, NULL );
 
     create_drive_devices();
 

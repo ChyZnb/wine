@@ -10455,9 +10455,8 @@ static void test_multi_adapter(void)
     }
 
     adapter_count = IDirect3D8_GetAdapterCount(d3d);
-    todo_wine_if(expected_adapter_count > 1)
-        ok(adapter_count == expected_adapter_count, "Got unexpected adapter count %u, expected %u.\n",
-                adapter_count, expected_adapter_count);
+    ok(adapter_count == expected_adapter_count, "Got unexpected adapter count %u, expected %u.\n",
+            adapter_count, expected_adapter_count);
 
     for (i = 0; i < adapter_count; ++i)
     {
@@ -10465,8 +10464,8 @@ static void test_multi_adapter(void)
         ok(!!monitor, "Adapter %u: Failed to get monitor.\n", i);
 
         monitor_info.cbSize = sizeof(monitor_info);
-        ok(GetMonitorInfoA(monitor, (MONITORINFO *)&monitor_info),
-                "Adapter %u: Failed to get monitor info, error %#x.\n", i, GetLastError());
+        ret = GetMonitorInfoA(monitor, (MONITORINFO *)&monitor_info);
+        ok(ret, "Adapter %u: Failed to get monitor info, error %#x.\n", i, GetLastError());
 
         if (!i)
             ok(monitor_info.dwFlags == MONITORINFOF_PRIMARY,
@@ -10597,6 +10596,7 @@ static void test_cursor_clipping(void)
     IDirect3D8 *d3d;
     HWND window;
     HRESULT hr;
+    BOOL ret;
 
     window = create_window();
     ok(!!window, "Failed to create a window.\n");
@@ -10625,10 +10625,12 @@ static void test_cursor_clipping(void)
                 "Adapter %u: Failed to find a different mode than %ux%u.\n", adapter_idx,
                 current_mode.Width, current_mode.Height);
 
-        ok(ClipCursor(NULL), "Adapter %u: ClipCursor failed, error %#x.\n", adapter_idx,
+        ret = ClipCursor(NULL);
+        ok(ret, "Adapter %u: ClipCursor failed, error %#x.\n", adapter_idx,
                 GetLastError());
         get_virtual_rect(&virtual_rect);
-        ok(GetClipCursor(&clip_rect), "Adapter %u: GetClipCursor failed, error %#x.\n", adapter_idx,
+        ret = GetClipCursor(&clip_rect);
+        ok(ret, "Adapter %u: GetClipCursor failed, error %#x.\n", adapter_idx,
                 GetLastError());
         ok(EqualRect(&clip_rect, &virtual_rect), "Adapter %u: Expect clip rect %s, got %s.\n",
                 adapter_idx, wine_dbgstr_rect(&virtual_rect), wine_dbgstr_rect(&clip_rect));
@@ -10643,7 +10645,8 @@ static void test_cursor_clipping(void)
         }
         flush_events();
         get_virtual_rect(&virtual_rect);
-        ok(GetClipCursor(&clip_rect), "Adapter %u: GetClipCursor failed, error %#x.\n", adapter_idx,
+        ret = GetClipCursor(&clip_rect);
+        ok(ret, "Adapter %u: GetClipCursor failed, error %#x.\n", adapter_idx,
                 GetLastError());
         ok(EqualRect(&clip_rect, &virtual_rect), "Adapter %u: Expect clip rect %s, got %s.\n",
                 adapter_idx, wine_dbgstr_rect(&virtual_rect), wine_dbgstr_rect(&clip_rect));
@@ -10651,7 +10654,8 @@ static void test_cursor_clipping(void)
         IDirect3DDevice8_Release(device);
         flush_events();
         get_virtual_rect(&virtual_rect);
-        ok(GetClipCursor(&clip_rect), "Adapter %u: GetClipCursor failed, error %#x.\n", adapter_idx,
+        ret = GetClipCursor(&clip_rect);
+        ok(ret, "Adapter %u: GetClipCursor failed, error %#x.\n", adapter_idx,
                 GetLastError());
         ok(EqualRect(&clip_rect, &virtual_rect), "Adapter %u: Expect clip rect %s, got %s.\n",
                 adapter_idx, wine_dbgstr_rect(&virtual_rect), wine_dbgstr_rect(&clip_rect));

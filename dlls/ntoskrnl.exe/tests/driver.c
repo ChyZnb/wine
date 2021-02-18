@@ -846,6 +846,8 @@ static void test_call_driver(DEVICE_OBJECT *device)
     KEVENT event;
     NTSTATUS status;
 
+    iosb.Status = 0xdeadbeef;
+    iosb.Information = 0xdeadbeef;
     irp = IoBuildAsynchronousFsdRequest(IRP_MJ_FLUSH_BUFFERS, device, NULL, 0, NULL, &iosb);
     ok(irp->UserIosb == &iosb, "unexpected UserIosb\n");
     ok(!irp->Cancel, "Cancel = %x\n", irp->Cancel);
@@ -854,6 +856,10 @@ static void test_call_driver(DEVICE_OBJECT *device)
     ok(irp->CurrentLocation == 2, "CurrentLocation = %u\n", irp->CurrentLocation);
     ok(irp->Tail.Overlay.Thread == (PETHREAD)KeGetCurrentThread(),
        "IRP thread is not the current thread\n");
+    ok(!irp->IoStatus.Status, "got status %#x\n", irp->IoStatus.Status);
+    ok(!irp->IoStatus.Information, "got information %#x\n", irp->IoStatus.Information);
+    ok(iosb.Status == 0xdeadbeef, "got status %#x\n", iosb.Status);
+    ok(iosb.Information == 0xdeadbeef, "got information %#x\n", iosb.Information);
 
     irpsp = IoGetNextIrpStackLocation(irp);
     ok(irpsp->MajorFunction == IRP_MJ_FLUSH_BUFFERS, "MajorFunction = %u\n", irpsp->MajorFunction);
@@ -863,10 +869,16 @@ static void test_call_driver(DEVICE_OBJECT *device)
 
     status = IoCallDriver(device, irp);
     ok(status == STATUS_PENDING, "IoCallDriver returned %#x\n", status);
+    ok(!irp->IoStatus.Status, "got status %#x\n", irp->IoStatus.Status);
+    ok(!irp->IoStatus.Information, "got information %#x\n", irp->IoStatus.Information);
+    ok(iosb.Status == 0xdeadbeef, "got status %#x\n", iosb.Status);
+    ok(iosb.Information == 0xdeadbeef, "got information %#x\n", iosb.Information);
 
     irp->IoStatus.Status = STATUS_SUCCESS;
-    irp->IoStatus.Information = 0;
+    irp->IoStatus.Information = 123;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
+    ok(iosb.Status == STATUS_SUCCESS, "got status %#x\n", iosb.Status);
+    ok(iosb.Information == 123, "got information %#x\n", iosb.Information);
 
     KeInitializeEvent(&event, NotificationEvent, FALSE);
 
@@ -2455,6 +2467,47 @@ static NTSTATUS WINAPI driver_QueryInformation(DEVICE_OBJECT *device, IRP *irp)
     return ret;
 }
 
+static NTSTATUS WINAPI driver_QueryVolumeInformation(DEVICE_OBJECT *device, IRP *irp)
+{
+    IO_STACK_LOCATION *stack = IoGetCurrentIrpStackLocation(irp);
+    ULONG length = stack->Parameters.QueryVolume.Length;
+    NTSTATUS ret;
+
+    switch (stack->Parameters.QueryVolume.FsInformationClass)
+    {
+    case FileFsVolumeInformation:
+    {
+        FILE_FS_VOLUME_INFORMATION *info = irp->AssociatedIrp.SystemBuffer;
+        static const WCHAR label[] = L"WineTestDriver";
+        ULONG serial = 0xdeadbeef;
+
+        if (length < sizeof(FILE_FS_VOLUME_INFORMATION))
+        {
+            ret = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        }
+
+        info->VolumeCreationTime.QuadPart = 0;
+        info->VolumeSerialNumber = serial;
+        info->VolumeLabelLength = min( lstrlenW(label) * sizeof(WCHAR),
+                                       length - offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) );
+        info->SupportsObjects = TRUE;
+        memcpy( info->VolumeLabel, label, info->VolumeLabelLength );
+
+        irp->IoStatus.Information = offsetof( FILE_FS_VOLUME_INFORMATION, VolumeLabel ) + info->VolumeLabelLength;
+        ret = STATUS_SUCCESS;
+        break;
+    }
+    default:
+        ret = STATUS_NOT_IMPLEMENTED;
+        break;
+    }
+
+    irp->IoStatus.Status = ret;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return ret;
+}
+
 static NTSTATUS WINAPI driver_Close(DEVICE_OBJECT *device, IRP *irp)
 {
     IO_STACK_LOCATION *stack = IoGetCurrentIrpStackLocation(irp);
@@ -2497,6 +2550,7 @@ NTSTATUS WINAPI DriverEntry(DRIVER_OBJECT *driver, PUNICODE_STRING registry)
     driver->MajorFunction[IRP_MJ_DEVICE_CONTROL]    = driver_IoControl;
     driver->MajorFunction[IRP_MJ_FLUSH_BUFFERS]     = driver_FlushBuffers;
     driver->MajorFunction[IRP_MJ_QUERY_INFORMATION] = driver_QueryInformation;
+    driver->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = driver_QueryVolumeInformation;
     driver->MajorFunction[IRP_MJ_CLOSE]             = driver_Close;
 
     RtlInitUnicodeString(&nameW, L"IoDriverObjectType");

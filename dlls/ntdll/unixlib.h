@@ -21,18 +21,19 @@
 #ifndef __NTDLL_UNIXLIB_H
 #define __NTDLL_UNIXLIB_H
 
-#include "wine/server.h"
 #include "wine/debug.h"
 
 struct _DISPATCHER_CONTEXT;
 
 /* increment this when you change the function table */
-#define NTDLL_UNIXLIB_VERSION 106
+#define NTDLL_UNIXLIB_VERSION 111
 
 struct unix_funcs
 {
     /* Nt* functions */
+#ifdef __aarch64__
     TEB *         (WINAPI *NtCurrentTeb)(void);
+#endif
 
     /* other Win32 API functions */
     NTSTATUS      (WINAPI *DbgUiIssueRemoteBreakin)( HANDLE process );
@@ -69,11 +70,6 @@ struct unix_funcs
     double        (CDECL *tan)( double d );
 
     /* environment functions */
-    NTSTATUS      (CDECL *get_initial_environment)( WCHAR **wargv[], WCHAR *env, SIZE_T *size );
-    NTSTATUS      (CDECL *get_startup_info)( startup_info_t *info, SIZE_T *total_size, SIZE_T *info_size );
-    NTSTATUS      (CDECL *get_dynamic_environment)( WCHAR *env, SIZE_T *size );
-    void          (CDECL *get_initial_console)( RTL_USER_PROCESS_PARAMETERS *params );
-    void          (CDECL *get_initial_directory)( UNICODE_STRING *dir );
     USHORT *      (CDECL *get_unix_codepage_data)(void);
     void          (CDECL *get_locales)( WCHAR *sys, WCHAR *user );
 
@@ -85,7 +81,7 @@ struct unix_funcs
 
     /* loader functions */
     NTSTATUS      (CDECL *load_so_dll)( UNICODE_STRING *nt_name, void **module );
-    NTSTATUS      (CDECL *load_builtin_dll)( const WCHAR *name, void **module, void **unix_entry,
+    NTSTATUS      (CDECL *load_builtin_dll)( UNICODE_STRING *name, void **module, void **unix_entry,
                                              SECTION_IMAGE_INFORMATION *image_info );
     NTSTATUS      (CDECL *unload_builtin_dll)( void *module );
     void          (CDECL *init_builtin_dll)( void *module );
