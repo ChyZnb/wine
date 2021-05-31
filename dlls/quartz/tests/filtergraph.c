@@ -23,23 +23,9 @@
 #define CONST_VTABLE
 
 #include "dshow.h"
-#include "wine/heap.h"
 #include "wine/test.h"
 
 static const GUID testguid = {0xabbccdde};
-
-typedef struct TestFilterImpl
-{
-    IBaseFilter IBaseFilter_iface;
-
-    LONG refCount;
-    CRITICAL_SECTION csFilter;
-    FILTER_STATE state;
-    FILTER_INFO filterInfo;
-    CLSID clsid;
-    IPin **ppPins;
-    UINT nPins;
-} TestFilterImpl;
 
 static BOOL compare_time(ULONGLONG x, ULONGLONG y, unsigned int max_diff)
 {
@@ -862,6 +848,7 @@ struct testfilter
     ULONG misc_flags;
 
     IMediaSeeking IMediaSeeking_iface;
+    IMediaPosition IMediaPosition_iface;
     LONG seeking_ref;
     DWORD seek_caps;
     BOOL support_testguid, support_media_time;
@@ -1329,6 +1316,10 @@ static HRESULT WINAPI testfilter_QueryInterface(IBaseFilter *iface, REFIID iid, 
     {
         *out = &filter->IMediaSeeking_iface;
     }
+    else if (IsEqualGUID(iid, &IID_IMediaPosition) && filter->IMediaPosition_iface.lpVtbl)
+    {
+        *out = &filter->IMediaPosition_iface;
+    }
     else if (IsEqualGUID(iid, &IID_IReferenceClock) && filter->IReferenceClock_iface.lpVtbl)
     {
         *out = &filter->IReferenceClock_iface;
@@ -1499,14 +1490,8 @@ static HRESULT WINAPI testfilter_JoinFilterGraph(IBaseFilter *iface, IFilterGrap
     if (winetest_debug > 1) trace("%p->JoinFilterGraph(%p, %s)\n", filter, graph, wine_dbgstr_w(name));
 
     filter->graph = graph;
-    heap_free(filter->name);
-    if (name)
-    {
-        filter->name = heap_alloc((wcslen(name) + 1) * sizeof(WCHAR));
-        wcscpy(filter->name, name);
-    }
-    else
-        filter->name = NULL;
+    free(filter->name);
+    filter->name = name ? wcsdup(name) : NULL;
     return S_OK;
 }
 
@@ -1630,7 +1615,7 @@ static HRESULT WINAPI testseek_QueryPreferredFormat(IMediaSeeking *iface, GUID *
 
 static HRESULT WINAPI testseek_GetTimeFormat(IMediaSeeking *iface, GUID *format)
 {
-    ok(0, "Unexpected call.\n");
+    if (winetest_debug > 1) trace("%p->GetTimeFormat()\n", iface);
     return E_NOTIMPL;
 }
 
@@ -1751,6 +1736,141 @@ static const IMediaSeekingVtbl testseek_vtbl =
     testseek_SetRate,
     testseek_GetRate,
     testseek_GetPreroll,
+};
+
+static struct testfilter *impl_from_IMediaPosition(IMediaPosition *iface)
+{
+    return CONTAINING_RECORD(iface, struct testfilter, IMediaPosition_iface);
+}
+
+static HRESULT WINAPI testpos_QueryInterface(IMediaPosition *iface, REFIID iid, void **out)
+{
+    struct testfilter *filter = impl_from_IMediaPosition(iface);
+    return IBaseFilter_QueryInterface(&filter->IBaseFilter_iface, iid, out);
+}
+
+static ULONG WINAPI testpos_AddRef(IMediaPosition *iface)
+{
+    struct testfilter *filter = impl_from_IMediaPosition(iface);
+    return IBaseFilter_AddRef(&filter->IBaseFilter_iface);
+}
+
+static ULONG WINAPI testpos_Release(IMediaPosition *iface)
+{
+    struct testfilter *filter = impl_from_IMediaPosition(iface);
+    return IBaseFilter_Release(&filter->IBaseFilter_iface);
+}
+
+static HRESULT WINAPI testpos_GetTypeInfoCount(IMediaPosition *iface, UINT *count)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_GetTypeInfo(IMediaPosition *iface, UINT index, LCID lcid, ITypeInfo **typeinfo)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_GetIDsOfNames(IMediaPosition *iface, REFIID riid, LPOLESTR *names, UINT count, LCID lcid, DISPID *ids)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_Invoke(IMediaPosition *iface, DISPID id, REFIID iid, LCID lcid, WORD flags, DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *error_arg)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_get_Duration(IMediaPosition *iface, REFTIME *length)
+{
+    if (winetest_debug > 1) trace("%p->get_Duration()\n", iface);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_put_CurrentPosition(IMediaPosition *iface, REFTIME time)
+{
+    if (winetest_debug > 1) trace("%p->put_CurrentPosition(%f)\n", iface, time);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_get_CurrentPosition(IMediaPosition *iface, REFTIME *time)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_get_StopTime(IMediaPosition *iface, REFTIME *time)
+{
+    if (winetest_debug > 1) trace("%p->get_StopTime()\n", iface);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_put_StopTime(IMediaPosition *iface, REFTIME time)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_get_PrerollTime(IMediaPosition *iface, REFTIME *time)
+{
+    if (winetest_debug > 1) trace("%p->get_PrerollTime()\n", iface);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_put_PrerollTime(IMediaPosition *iface, REFTIME time)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_put_Rate(IMediaPosition *iface, double rate)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_get_Rate(IMediaPosition *iface, double *rate)
+{
+    if (winetest_debug > 1) trace("%p->get_Rate()\n", iface);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_CanSeekForward(IMediaPosition *iface, LONG *can_seek_forward)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI testpos_CanSeekBackward(IMediaPosition *iface, LONG *can_seek_backward)
+{
+    ok(0, "Unexpected call.\n");
+    return E_NOTIMPL;
+}
+
+static const IMediaPositionVtbl testpos_vtbl =
+{
+    testpos_QueryInterface,
+    testpos_AddRef,
+    testpos_Release,
+    testpos_GetTypeInfoCount,
+    testpos_GetTypeInfo,
+    testpos_GetIDsOfNames,
+    testpos_Invoke,
+    testpos_get_Duration,
+    testpos_put_CurrentPosition,
+    testpos_get_CurrentPosition,
+    testpos_get_StopTime,
+    testpos_put_StopTime,
+    testpos_get_PrerollTime,
+    testpos_put_PrerollTime,
+    testpos_put_Rate,
+    testpos_get_Rate,
+    testpos_CanSeekForward,
+    testpos_CanSeekBackward,
 };
 
 static struct testfilter *impl_from_IReferenceClock(IReferenceClock *iface)
@@ -3984,9 +4104,9 @@ static void test_ec_complete(void)
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
     /* A filter counts as a renderer if it (1) exposes IAMFilterMiscFlags and
-     * reports itself as a renderer, or (2) exposes IMediaSeeking and has no
-     * output pins. Despite MSDN, QueryInternalConnections() does not seem to
-     * be used. */
+     * reports itself as a renderer, or (2) exposes IMediaSeeking or
+     * IMediaPosition and has no output pins. Despite MSDN,
+     * QueryInternalConnections() does not seem to be used. */
 
     IFilterGraph2_RemoveFilter(graph, &filter1.IBaseFilter_iface);
     IFilterGraph2_RemoveFilter(graph, &filter2.IBaseFilter_iface);
@@ -4030,7 +4150,16 @@ static void test_ec_complete(void)
     ok(filter1.seeking_ref == 0, "Unexpected seeking refcount %d.\n", filter1.seeking_ref);
     IFilterGraph2_RemoveFilter(graph, &filter1.IBaseFilter_iface);
 
+    filter1.IMediaPosition_iface.lpVtbl = &testpos_vtbl;
+    IFilterGraph2_AddFilter(graph, &filter1.IBaseFilter_iface, NULL);
+
+    hr = check_ec_complete(graph, &filter1.IBaseFilter_iface);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    IFilterGraph2_RemoveFilter(graph, &filter1.IBaseFilter_iface);
+
     filter1.IMediaSeeking_iface.lpVtbl = NULL;
+    filter1.IMediaPosition_iface.lpVtbl = NULL;
     filter1_pin.dir = PINDIR_INPUT;
     filter1.pin_count = 1;
     filter1_pin.QueryInternalConnections_hr = S_OK;
@@ -4038,6 +4167,14 @@ static void test_ec_complete(void)
 
     hr = check_ec_complete(graph, &filter1.IBaseFilter_iface);
     ok(hr == E_ABORT, "Got hr %#x.\n", hr);
+
+    IFilterGraph2_RemoveFilter(graph, &filter1.IBaseFilter_iface);
+
+    filter1.IMediaPosition_iface.lpVtbl = &testpos_vtbl;
+    IFilterGraph2_AddFilter(graph, &filter1.IBaseFilter_iface, NULL);
+
+    hr = check_ec_complete(graph, &filter1.IBaseFilter_iface);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
 
     IMediaControl_Release(control);
     IMediaEvent_Release(eventsrc);
@@ -5156,12 +5293,12 @@ static void test_set_notify_flags(void)
     IMediaEventEx *media_event;
     struct testfilter filter;
     LONG_PTR param1, param2;
+    LONG code, flags;
     HANDLE event;
     HWND window;
     BSTR status;
     HRESULT hr;
     ULONG ref;
-    LONG code;
     MSG msg;
 
     window = CreateWindowA("static", NULL, WS_OVERLAPPEDWINDOW,
@@ -5196,13 +5333,29 @@ static void test_set_notify_flags(void)
 
     while (PeekMessageA(&msg, window, WM_USER, WM_USER, PM_REMOVE));
 
+    hr = IMediaEventEx_SetNotifyFlags(media_event, 2);
+    ok(hr == E_INVALIDARG, "Got hr %#x.\n", hr);
+
+    hr = IMediaEventEx_GetNotifyFlags(media_event, NULL);
+    ok(hr == E_POINTER, "Got hr %#x.\n", hr);
+
+    flags = 0xdeadbeef;
+    hr = IMediaEventEx_GetNotifyFlags(media_event, &flags);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    ok(!flags, "Got flags %#x\n", flags);
+
     hr = IMediaEventEx_SetNotifyFlags(media_event, AM_MEDIAEVENT_NONOTIFY);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
-    todo_wine ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
+    flags = 0xdeadbeef;
+    hr = IMediaEventEx_GetNotifyFlags(media_event, &flags);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    ok(flags == AM_MEDIAEVENT_NONOTIFY, "Got flags %#x\n", flags);
+
+    ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
 
     hr = IMediaEventEx_GetEvent(media_event, &code, &param1, &param2, 50);
-    todo_wine ok(hr == E_ABORT, "Got hr %#x.\n", hr);
+    ok(hr == E_ABORT, "Got hr %#x.\n", hr);
 
     hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
@@ -5233,7 +5386,7 @@ static void test_set_notify_flags(void)
     hr = IMediaControl_Run(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
-    todo_wine ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
+    ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
 
     hr = IMediaEventSink_Notify(media_event_sink, EC_COMPLETE, S_OK,
             (LONG_PTR)&filter.IBaseFilter_iface);
@@ -5244,10 +5397,15 @@ static void test_set_notify_flags(void)
     hr = IMediaEventEx_GetEvent(media_event, &code, &param1, &param2, 50);
     ok(hr == E_ABORT, "Got hr %#x.\n", hr);
 
-    todo_wine ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
+    ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
 
     hr = IMediaEventEx_SetNotifyFlags(media_event, 0);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    flags = 0xdeadbeef;
+    hr = IMediaEventEx_GetNotifyFlags(media_event, &flags);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    ok(!flags, "Got flags %#x\n", flags);
 
     hr = IMediaControl_Stop(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
@@ -5261,7 +5419,7 @@ static void test_set_notify_flags(void)
     hr = IMediaEventEx_SetNotifyFlags(media_event, AM_MEDIAEVENT_NONOTIFY);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
-    todo_wine ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
+    ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
 
     hr = IMediaControl_Stop(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
@@ -5277,9 +5435,9 @@ static void test_set_notify_flags(void)
     DestroyWindow(window);
 }
 
-#define check_events(a, b, c, d) check_events_(__LINE__, a, b, c, d)
+#define check_events(a, b, c) check_events_(__LINE__, a, b, c)
 static void check_events_(unsigned int line, IMediaEventEx *media_event,
-        int expected_ec_complete_count, int expected_ec_status_count, BOOL todo)
+        int expected_ec_complete_count, int expected_ec_status_count)
 {
     int ec_complete_count = 0;
     int ec_status_count = 0;
@@ -5295,9 +5453,11 @@ static void check_events_(unsigned int line, IMediaEventEx *media_event,
             ++ec_complete_count;
         if (code == EC_STATUS)
             ++ec_status_count;
+        hr = IMediaEventEx_FreeEventParams(media_event, code, param1, param2);
+        ok(hr == S_OK, "Got hr %#x.\n", hr);
     }
     ok(hr == E_ABORT, "Got hr %#x.\n", hr);
-    todo_wine_if(todo) ok_(__FILE__, line)(ec_complete_count == expected_ec_complete_count,
+    ok_(__FILE__, line)(ec_complete_count == expected_ec_complete_count,
         "Expected %d EC_COMPLETE events.\n", expected_ec_complete_count);
     ok_(__FILE__, line)(ec_status_count == expected_ec_status_count,
         "Expected %d EC_STATUS events.\n", expected_ec_status_count);
@@ -5336,7 +5496,49 @@ static void test_events(void)
     hr = IMediaEventEx_GetEventHandle(media_event, (OAEVENT *)&event);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
+    code = 0xdeadbeef;
+    param1 = 0xdeadbeef;
+    param2 = 0xdeadbeef;
+    hr = IMediaEventEx_GetEvent(media_event, &code, &param1, &param2, 0);
+    ok(hr == E_ABORT, "Got hr %#x.\n", hr);
+    ok(!code, "Got code %#x.\n", code);
+    todo_wine ok(!param1, "Got param1 %#Ix.\n", param1);
+    todo_wine ok(!param2, "Got param2 %#Ix.\n", param2);
+
+    /* EC_COMPLETE is ignored while in stopped or paused state. */
+
+    hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaEventSink_Notify(media_event_sink, EC_COMPLETE, S_OK,
+            (LONG_PTR)&filter.IBaseFilter_iface);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    check_events(media_event, 0, 2);
+
+    hr = IMediaControl_Pause(media_control);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaEventSink_Notify(media_event_sink, EC_COMPLETE, S_OK,
+            (LONG_PTR)&filter.IBaseFilter_iface);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    check_events(media_event, 0, 2);
+
     hr = IMediaControl_Run(media_control);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    check_events(media_event, 0, 0);
+
+    /* Pausing and then running the graph clears pending EC_COMPLETE events.
+     * This remains true even with default handling canceled. */
+
+    hr = IMediaEventEx_CancelDefaultHandling(media_event, EC_COMPLETE);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
     hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
@@ -5350,7 +5552,7 @@ static void test_events(void)
     hr = IMediaControl_Stop(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
-    check_events(media_event, 1, 2, FALSE);
+    check_events(media_event, 1, 2);
 
     hr = IMediaControl_Run(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
@@ -5368,7 +5570,7 @@ static void test_events(void)
     hr = IMediaControl_Run(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
-    check_events(media_event, 0, 2, TRUE);
+    check_events(media_event, 0, 2);
 
     hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
@@ -5383,14 +5585,33 @@ static void test_events(void)
     hr = IMediaControl_Pause(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
 
-    check_events(media_event, 1, 2, FALSE);
+    check_events(media_event, 1, 2);
+
+    hr = IMediaControl_Run(media_control);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaEventSink_Notify(media_event_sink, EC_COMPLETE, S_OK,
+            (LONG_PTR)&filter.IBaseFilter_iface);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaEventSink_Notify(media_event_sink, EC_STATUS, (LONG_PTR)status, (LONG_PTR)status);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    hr = IMediaControl_Pause(media_control);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+    hr = IMediaControl_Run(media_control);
+    ok(hr == S_OK, "Got hr %#x.\n", hr);
+
+    check_events(media_event, 0, 2);
+
+    /* GetEvent() resets the event object if there are no events available. */
 
     SetEvent(event);
 
     hr = IMediaEventEx_GetEvent(media_event, &code, &param1, &param2, 50);
     ok(hr == E_ABORT, "Got hr %#x.\n", hr);
 
-    todo_wine ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
+    ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "Event should not be signaled.\n");
 
     hr = IMediaControl_Stop(media_control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);

@@ -18,27 +18,18 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#define WINE_NO_NAMELESS_EXTENSION
+
 #include "gst_private.h"
+#include "winternl.h"
 #include "rpcproxy.h"
-#include "wine/debug.h"
-#include "wine/unicode.h"
 
 #include "initguid.h"
 #include "gst_guids.h"
 
-static HINSTANCE winegstreamer_instance;
 LONG object_locks;
 
 WINE_DEFAULT_DEBUG_CHANNEL(gstreamer);
-
-static const WCHAR wGstreamer_Splitter[] =
-{'G','S','t','r','e','a','m','e','r',' ','s','p','l','i','t','t','e','r',' ','f','i','l','t','e','r',0};
-static const WCHAR wave_parserW[] =
-{'W','a','v','e',' ','P','a','r','s','e','r',0};
-static const WCHAR avi_splitterW[] =
-{'A','V','I',' ','S','p','l','i','t','t','e','r',0};
-static const WCHAR mpeg_splitterW[] =
-{'M','P','E','G','-','I',' ','S','t','r','e','a','m',' ','S','p','l','i','t','t','e','r',0};
 
 const struct unix_funcs *unix_funcs = NULL;
 
@@ -46,7 +37,6 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 {
     if (reason == DLL_PROCESS_ATTACH)
     {
-        winegstreamer_instance = instance;
         DisableThreadLibraryCalls(instance);
         __wine_init_unix_lib(instance, reason, NULL, &unix_funcs);
     }
@@ -179,11 +169,9 @@ static BOOL CALLBACK init_gstreamer_proc(INIT_ONCE *once, void *param, void **ct
     /* Unloading glib is a bad idea.. it installs atexit handlers,
      * so never unload the dll after loading */
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            (LPCWSTR)winegstreamer_instance, &handle);
+            (LPCWSTR)init_gstreamer_proc, &handle);
     if (!handle)
-        ERR("Failed to pin module %p.\n", winegstreamer_instance);
-
-    start_dispatch_thread();
+        ERR("Failed to pin module.\n");
 
     return TRUE;
 }
@@ -331,18 +319,19 @@ HRESULT WINAPI DllRegisterServer(void)
 
     TRACE(".\n");
 
-    if (FAILED(hr = __wine_register_resources(winegstreamer_instance)))
+    if (FAILED(hr = __wine_register_resources()))
         return hr;
 
     if (FAILED(hr = CoCreateInstance(&CLSID_FilterMapper2, NULL, CLSCTX_INPROC_SERVER,
             &IID_IFilterMapper2, (void **)&mapper)))
         return hr;
 
-    IFilterMapper2_RegisterFilter(mapper, &CLSID_AviSplitter, avi_splitterW, NULL, NULL, NULL, &reg_avi_splitter);
+    IFilterMapper2_RegisterFilter(mapper, &CLSID_AviSplitter, L"AVI Splitter", NULL, NULL, NULL, &reg_avi_splitter);
     IFilterMapper2_RegisterFilter(mapper, &CLSID_decodebin_parser,
-            wGstreamer_Splitter, NULL, NULL, NULL, &reg_decodebin_parser);
-    IFilterMapper2_RegisterFilter(mapper, &CLSID_MPEG1Splitter, mpeg_splitterW, NULL, NULL, NULL, &reg_mpeg_splitter);
-    IFilterMapper2_RegisterFilter(mapper, &CLSID_WAVEParser, wave_parserW, NULL, NULL, NULL, &reg_wave_parser);
+            L"GStreamer splitter filter", NULL, NULL, NULL, &reg_decodebin_parser);
+    IFilterMapper2_RegisterFilter(mapper, &CLSID_MPEG1Splitter,
+            L"MPEG-I Stream Splitter", NULL, NULL, NULL, &reg_mpeg_splitter);
+    IFilterMapper2_RegisterFilter(mapper, &CLSID_WAVEParser, L"Wave Parser", NULL, NULL, NULL, &reg_wave_parser);
 
     IFilterMapper2_Release(mapper);
 
@@ -356,7 +345,7 @@ HRESULT WINAPI DllUnregisterServer(void)
 
     TRACE(".\n");
 
-    if (FAILED(hr = __wine_unregister_resources(winegstreamer_instance)))
+    if (FAILED(hr = __wine_unregister_resources()))
         return hr;
 
     if (FAILED(hr = CoCreateInstance(&CLSID_FilterMapper2, NULL, CLSCTX_INPROC_SERVER,

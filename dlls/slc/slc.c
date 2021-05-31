@@ -74,22 +74,10 @@ HRESULT WINAPI SLOpen(HSLC *handle)
 {
     FIXME("(%p) stub\n", handle );
 
-    return S_OK;
-}
+    if (!handle)
+        return E_INVALIDARG;
 
-/***********************************************************************
- *             DllMain   (CLUSAPI.@)
- *
- */
-BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
-{
-    switch(fdwReason)
-    {
-    case DLL_WINE_PREATTACH:
-        return FALSE;  /* prefer native version */
-    case DLL_PROCESS_ATTACH:
-        DisableThreadLibraryCalls( hinstDLL );
-        break;
-    }
-    return TRUE;
+    *handle = (HSLC)0xdeadbeef;
+
+    return S_OK;
 }

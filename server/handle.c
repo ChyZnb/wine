@@ -678,8 +678,7 @@ DECL_HANDLER(dup_handle)
         }
         /* close the handle no matter what happened */
         if ((req->options & DUPLICATE_CLOSE_SOURCE) && (src != dst || req->src_handle != reply->handle))
-            reply->closed = !close_handle( src, req->src_handle );
-        reply->self = (src == current->process);
+            close_handle( src, req->src_handle );
         release_object( src );
     }
 }
@@ -830,9 +829,13 @@ static int enum_handles( struct process *process, void *user )
         }
         assert( info->count );
         handle = info->handle++;
-        handle->owner  = process->id;
-        handle->handle = index_to_handle(i);
-        handle->access = entry->access & ~RESERVED_ALL;
+        handle->owner      = process->id;
+        handle->handle     = index_to_handle(i);
+        handle->access     = entry->access & ~RESERVED_ALL;
+        handle->type       = entry->ptr->ops->type->index;
+        handle->attributes = 0;
+        if (entry->access & RESERVED_INHERIT) handle->attributes |= OBJ_INHERIT;
+        if (entry->access & RESERVED_CLOSE_PROTECT) handle->attributes |= OBJ_PROTECT_CLOSE;
         info->count--;
     }
 

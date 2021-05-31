@@ -40,58 +40,15 @@
 #include "wine/debug.h"
 #include "wine/exception.h"
 
-#define IS_OPTION_TRUE(ch) ((ch) == 'y' || (ch) == 'Y' || (ch) == 't' || (ch) == 'T' || (ch) == '1')
-
-static BOOL show_dot_files;
-
-/***********************************************************************
- *           init_directories
- */
-void init_directories(void)
-{
-    char tmp[80];
-    HANDLE root, hkey;
-    DWORD dummy;
-    OBJECT_ATTRIBUTES attr;
-    UNICODE_STRING nameW;
-
-    RtlOpenCurrentUser( KEY_ALL_ACCESS, &root );
-    attr.Length = sizeof(attr);
-    attr.RootDirectory = root;
-    attr.ObjectName = &nameW;
-    attr.Attributes = 0;
-    attr.SecurityDescriptor = NULL;
-    attr.SecurityQualityOfService = NULL;
-    RtlInitUnicodeString( &nameW, L"Software\\Wine" );
-
-    /* @@ Wine registry key: HKCU\Software\Wine */
-    if (!NtOpenKey( &hkey, KEY_ALL_ACCESS, &attr ))
-    {
-        RtlInitUnicodeString( &nameW, L"ShowDotFiles" );
-        if (!NtQueryValueKey( hkey, &nameW, KeyValuePartialInformation, tmp, sizeof(tmp), &dummy ))
-        {
-            WCHAR *str = (WCHAR *)((KEY_VALUE_PARTIAL_INFORMATION *)tmp)->Data;
-            show_dot_files = IS_OPTION_TRUE( str[0] );
-        }
-        NtClose( hkey );
-    }
-    NtClose( root );
-    unix_funcs->set_show_dot_files( show_dot_files );
-}
-
 
 /******************************************************************
  *		RtlWow64EnableFsRedirection   (NTDLL.@)
  */
 NTSTATUS WINAPI RtlWow64EnableFsRedirection( BOOLEAN enable )
 {
-#ifdef _WIN64
-     return STATUS_NOT_IMPLEMENTED;
-#else
     if (!NtCurrentTeb64()) return STATUS_NOT_IMPLEMENTED;
     NtCurrentTeb64()->TlsSlots[WOW64_TLS_FILESYSREDIR] = !enable;
     return STATUS_SUCCESS;
-#endif
 }
 
 
@@ -100,9 +57,6 @@ NTSTATUS WINAPI RtlWow64EnableFsRedirection( BOOLEAN enable )
  */
 NTSTATUS WINAPI RtlWow64EnableFsRedirectionEx( ULONG disable, ULONG *old_value )
 {
-#ifdef _WIN64
-     return STATUS_NOT_IMPLEMENTED;
-#else
     if (!NtCurrentTeb64()) return STATUS_NOT_IMPLEMENTED;
 
     __TRY
@@ -117,7 +71,6 @@ NTSTATUS WINAPI RtlWow64EnableFsRedirectionEx( ULONG disable, ULONG *old_value )
 
     NtCurrentTeb64()->TlsSlots[WOW64_TLS_FILESYSREDIR] = disable;
     return STATUS_SUCCESS;
-#endif
 }
 
 

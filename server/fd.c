@@ -549,7 +549,6 @@ static inline void set_fd_epoll_events( struct fd *fd, int user, int events )
     }
     else if (pollfd[user].fd == -1)
     {
-        if (pollfd[user].events) return;  /* stopped waiting on it, don't restart */
         ctl = EPOLL_CTL_ADD;
     }
     else
@@ -658,7 +657,6 @@ static inline void set_fd_epoll_events( struct fd *fd, int user, int events )
     }
     else if (pollfd[user].fd == -1)
     {
-        if (pollfd[user].events) return;  /* stopped waiting on it, don't restart */
         ev[0].flags |= EV_ADD | ((events & POLLIN) ? EV_ENABLE : EV_DISABLE);
         ev[1].flags |= EV_ADD | ((events & POLLOUT) ? EV_ENABLE : EV_DISABLE);
     }
@@ -767,7 +765,6 @@ static inline void set_fd_epoll_events( struct fd *fd, int user, int events )
     }
     else if (pollfd[user].fd == -1)
     {
-        if (pollfd[user].events) return;  /* stopped waiting on it, don't restart */
         ret = port_associate( port_fd, PORT_SOURCE_FD, fd->unix_fd, events, (void *)user );
     }
     else
@@ -1647,7 +1644,7 @@ void set_fd_events( struct fd *fd, int events )
         pollfd[user].events = POLLERR;
         pollfd[user].revents = 0;
     }
-    else if (pollfd[user].fd != -1 || !pollfd[user].events)
+    else
     {
         pollfd[user].fd = fd->unix_fd;
         pollfd[user].events = events;
@@ -2079,6 +2076,12 @@ unsigned int get_fd_options( struct fd *fd )
     return fd->options;
 }
 
+/* retrieve the completion flags for the fd */
+unsigned int get_fd_comp_flags( struct fd *fd )
+{
+    return fd->comp_flags;
+}
+
 /* check if fd is in overlapped mode */
 int is_fd_overlapped( struct fd *fd )
 {
@@ -2116,12 +2119,6 @@ void set_fd_signaled( struct fd *fd, int signaled )
     if (fd->comp_flags & FILE_SKIP_SET_EVENT_ON_HANDLE) return;
     fd->signaled = signaled;
     if (signaled) wake_up( fd->user, 0 );
-}
-
-/* handler for close_handle that refuses to close fd-associated handles in other processes */
-int fd_close_handle( struct object *obj, struct process *process, obj_handle_t handle )
-{
-    return (!current || current->process == process);
 }
 
 /* check if events are pending and if yes return which one(s) */

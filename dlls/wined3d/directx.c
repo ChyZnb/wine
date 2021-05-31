@@ -514,6 +514,7 @@ static const struct wined3d_gpu_description gpu_description_table[] =
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_VEGA_20,     "Radeon RX Vega 20",                DRIVER_AMD_RX,           4096},
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_NAVI_10,     "Radeon RX 5700 / 5700 XT",         DRIVER_AMD_RX,           8192},
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_NAVI_14,     "Radeon RX 5500M",                  DRIVER_AMD_RX,           4096},
+    {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_NAVI_21,     "Radeon RX 6800/6800 XT / 6900 XT", DRIVER_AMD_RX,          16384},
 
     /* Red Hat */
     {HW_VENDOR_REDHAT,     CARD_REDHAT_VIRGL,              "Red Hat VirtIO GPU",                                        DRIVER_REDHAT_VIRGL,  1024},
@@ -600,6 +601,7 @@ static const struct wined3d_gpu_description gpu_description_table[] =
     {HW_VENDOR_INTEL,      CARD_INTEL_HD620,               "Intel(R) HD Graphics 620",                                  DRIVER_INTEL_HD4000,  3072},
     {HW_VENDOR_INTEL,      CARD_INTEL_HD630_1,             "Intel(R) HD Graphics 630",                                  DRIVER_INTEL_HD4000,  3072},
     {HW_VENDOR_INTEL,      CARD_INTEL_HD630_2,             "Intel(R) HD Graphics 630",                                  DRIVER_INTEL_HD4000,  3072},
+    {HW_VENDOR_INTEL,      CARD_INTEL_UHD630,              "Intel(R) UHD Graphics 630",                                 DRIVER_INTEL_HD4000,  3072},
 };
 
 static const struct driver_version_information *get_driver_version_info(enum wined3d_display_driver driver,
@@ -1492,6 +1494,32 @@ HRESULT CDECL wined3d_output_set_display_mode(struct wined3d_output *output,
 
     /* Store the new values. */
     output->screen_format = new_format_id;
+
+    return WINED3D_OK;
+}
+
+HRESULT CDECL wined3d_output_set_gamma_ramp(struct wined3d_output *output, const struct wined3d_gamma_ramp *ramp)
+{
+    HDC dc;
+
+    TRACE("output %p, ramp %p.\n", output, ramp);
+
+    dc = CreateDCW(output->device_name, NULL, NULL, NULL);
+    SetDeviceGammaRamp(dc, (void *)ramp);
+    DeleteDC(dc);
+
+    return WINED3D_OK;
+}
+
+HRESULT wined3d_output_get_gamma_ramp(struct wined3d_output *output, struct wined3d_gamma_ramp *ramp)
+{
+    HDC dc;
+
+    TRACE("output %p, ramp %p.\n", output, ramp);
+
+    dc = CreateDCW(output->device_name, NULL, NULL, NULL);
+    GetDeviceGammaRamp(dc, ramp);
+    DeleteDC(dc);
 
     return WINED3D_OK;
 }
@@ -2660,7 +2688,7 @@ static void adapter_no3d_destroy_device(struct wined3d_device *device)
     heap_free(device);
 }
 
-struct wined3d_context *adapter_no3d_acquire_context(struct wined3d_device *device,
+static struct wined3d_context *adapter_no3d_acquire_context(struct wined3d_device *device,
         struct wined3d_texture *texture, unsigned int sub_resource_idx)
 {
     TRACE("device %p, texture %p, sub_resource_idx %u.\n", device, texture, sub_resource_idx);
@@ -2673,7 +2701,7 @@ struct wined3d_context *adapter_no3d_acquire_context(struct wined3d_device *devi
     return &wined3d_device_no3d(device)->context_no3d;
 }
 
-void adapter_no3d_release_context(struct wined3d_context *context)
+static void adapter_no3d_release_context(struct wined3d_context *context)
 {
     TRACE("context %p.\n", context);
 }
@@ -3017,7 +3045,7 @@ static void adapter_no3d_dispatch_compute(struct wined3d_device *device,
     ERR("device %p, state %p, parameters %p.\n", device, state, parameters);
 }
 
-void adapter_no3d_clear_uav(struct wined3d_context *context,
+static void adapter_no3d_clear_uav(struct wined3d_context *context,
         struct wined3d_unordered_access_view *view, const struct wined3d_uvec4 *clear_value)
 {
     ERR("context %p, view %p, clear_value %s.\n", context, view, debug_uvec4(clear_value));

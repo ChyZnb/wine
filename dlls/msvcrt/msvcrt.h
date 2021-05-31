@@ -31,6 +31,7 @@
 #include "windef.h"
 #include "winbase.h"
 #undef strncpy
+#undef wcsncpy
 
 extern BOOL sse2_supported DECLSPEC_HIDDEN;
 
@@ -167,6 +168,7 @@ struct __thread_data {
     void                           *unk10[100];
 #if _MSVCR_VER >= 140
     _invalid_parameter_handler      invalid_parameter_handler;
+    HMODULE                         module;
 #endif
 };
 
@@ -232,7 +234,6 @@ extern BOOL msvcrt_init_locale(void) DECLSPEC_HIDDEN;
 extern void msvcrt_init_math(void*) DECLSPEC_HIDDEN;
 extern void msvcrt_init_io(void) DECLSPEC_HIDDEN;
 extern void msvcrt_free_io(void) DECLSPEC_HIDDEN;
-extern void msvcrt_init_console(void) DECLSPEC_HIDDEN;
 extern void msvcrt_free_console(void) DECLSPEC_HIDDEN;
 extern void msvcrt_init_args(void) DECLSPEC_HIDDEN;
 extern void msvcrt_free_args(void) DECLSPEC_HIDDEN;

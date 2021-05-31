@@ -168,7 +168,7 @@ static const struct object_ops console_server_ops =
     NULL,                             /* unlink_name */
     console_server_open_file,         /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
-    fd_close_handle,                  /* close_handle */
+    no_close_handle,                  /* close_handle */
     console_server_destroy            /* destroy */
 };
 
@@ -649,8 +649,7 @@ static int propagate_console_signal_cb(struct process *process, void *user)
 {
     struct console_signal_info* csi = (struct console_signal_info*)user;
 
-    if (process->console == csi->console && process->running_threads &&
-        (!csi->group || process->group_id == csi->group))
+    if (process->console == csi->console && (!csi->group || process->group_id == csi->group))
     {
         /* find a suitable thread to signal */
         struct thread *thread;

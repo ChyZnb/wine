@@ -31,7 +31,6 @@
 #include "evcode.h"
 
 #include "wine/debug.h"
-#include "wine/heap.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(evr);
 
@@ -200,7 +199,7 @@ static void video_mixer_clear_types(struct video_mixer *mixer)
     {
         IMFMediaType_Release(mixer->output.rt_formats[i].media_type);
     }
-    heap_free(mixer->output.rt_formats);
+    free(mixer->output.rt_formats);
     if (mixer->output.media_type)
         IMFMediaType_Release(mixer->output.media_type);
     mixer->output.media_type = NULL;
@@ -604,8 +603,8 @@ static HRESULT WINAPI video_mixer_transform_GetOutputAvailableType(IMFTransform 
         hr = MF_E_NO_MORE_TYPES;
     else
     {
-        *type = mixer->output.rt_formats[index].media_type;
-        IMFMediaType_AddRef(*type);
+        if (SUCCEEDED(hr = MFCreateMediaType(type)))
+            hr = IMFMediaType_CopyAllItems(mixer->output.rt_formats[index].media_type, (IMFAttributes *)*type);
     }
 
     LeaveCriticalSection(&mixer->cs);
@@ -643,13 +642,19 @@ done:
     return hr;
 }
 
-static int __cdecl rt_formats_sort_compare(const void *left, const void *right)
+static void video_mixer_append_rt_format(struct rt_format *rt_formats, unsigned int *count,
+        const GUID *device, D3DFORMAT format)
 {
-    const struct rt_format *format1 = left, *format2 = right;
+    unsigned int i;
 
-    if (format1->format < format2->format) return -1;
-    if (format1->format > format2->format) return 1;
-    return 0;
+    for (i = 0; i < *count; ++i)
+    {
+        if (rt_formats[i].format == format) return;
+    }
+
+    rt_formats[*count].format = format;
+    rt_formats[*count].device = *device;
+    *count += 1;
 }
 
 static HRESULT video_mixer_collect_output_types(struct video_mixer *mixer, const DXVA2_VideoDesc *video_desc,
@@ -668,7 +673,7 @@ static HRESULT video_mixer_collect_output_types(struct video_mixer *mixer, const
         if (SUCCEEDED(IDirectXVideoProcessorService_GetVideoProcessorRenderTargets(service, &devices[i], video_desc,
               &format_count, &formats)))
         {
-            if (!(ptr = heap_realloc(rt_formats, (count + format_count) * sizeof(*rt_formats))))
+            if (!(ptr = realloc(rt_formats, (count + format_count) * sizeof(*rt_formats))))
             {
                 hr = E_OUTOFMEMORY;
                 count = 0;
@@ -678,11 +683,7 @@ static HRESULT video_mixer_collect_output_types(struct video_mixer *mixer, const
             rt_formats = ptr;
 
             for (j = 0; j < format_count; ++j)
-            {
-                rt_formats[count + j].format = formats[j];
-                rt_formats[count + j].device = devices[i];
-            }
-            count += format_count;
+                video_mixer_append_rt_format(rt_formats, &count, &devices[i], formats[j]);
 
             CoTaskMemFree(formats);
         }
@@ -690,20 +691,8 @@ static HRESULT video_mixer_collect_output_types(struct video_mixer *mixer, const
 
     if (count && !(flags & MFT_SET_TYPE_TEST_ONLY))
     {
-        qsort(rt_formats, count, sizeof(*rt_formats), rt_formats_sort_compare);
-
-        j = 0;
-        for (i = j + 1; i < count; ++i)
-        {
-            if (rt_formats[i].format != rt_formats[j].format)
-            {
-                rt_formats[++j] = rt_formats[i];
-            }
-        }
-        count = j + 1;
-
         memcpy(&subtype, &MFVideoFormat_Base, sizeof(subtype));
-        if ((mixer->output.rt_formats = heap_calloc(count, sizeof(*mixer->output.rt_formats))))
+        if ((mixer->output.rt_formats = calloc(count, sizeof(*mixer->output.rt_formats))))
         {
             for (i = 0; i < count; ++i)
             {
@@ -727,7 +716,7 @@ static HRESULT video_mixer_collect_output_types(struct video_mixer *mixer, const
         }
     }
 
-    heap_free(rt_formats);
+    free(rt_formats);
 
     return count ? S_OK : hr;
 }
@@ -821,16 +810,22 @@ static HRESULT WINAPI video_mixer_transform_SetInputType(IMFTransform *iface, DW
 
 static HRESULT WINAPI video_mixer_transform_SetOutputType(IMFTransform *iface, DWORD id, IMFMediaType *type, DWORD flags)
 {
-    const unsigned int equality_flags = MF_MEDIATYPE_EQUAL_MAJOR_TYPES |
-            MF_MEDIATYPE_EQUAL_FORMAT_TYPES | MF_MEDIATYPE_EQUAL_FORMAT_DATA;
+    const unsigned int equality_flags = MF_MEDIATYPE_EQUAL_MAJOR_TYPES | MF_MEDIATYPE_EQUAL_FORMAT_TYPES;
     struct video_mixer *mixer = impl_from_IMFTransform(iface);
     HRESULT hr = MF_E_INVALIDMEDIATYPE;
     unsigned int i, compare_flags;
+    BOOL is_compressed = TRUE;
 
     TRACE("%p, %u, %p, %#x.\n", iface, id, type, flags);
 
     if (id)
         return MF_E_INVALIDSTREAMNUMBER;
+
+    if (!type)
+        return E_INVALIDARG;
+
+    if (FAILED(IMFMediaType_IsCompressedFormat(type, &is_compressed)) || is_compressed)
+        return MF_E_INVALIDMEDIATYPE;
 
     EnterCriticalSection(&mixer->cs);
 
@@ -899,7 +894,7 @@ static HRESULT WINAPI video_mixer_transform_GetInputCurrentType(IMFTransform *if
             hr = MF_E_TRANSFORM_TYPE_NOT_SET;
         else
         {
-            *type = (IMFMediaType *)stream->media_type;
+            *type = stream->media_type;
             IMFMediaType_AddRef(*type);
         }
     }
@@ -925,7 +920,7 @@ static HRESULT WINAPI video_mixer_transform_GetOutputCurrentType(IMFTransform *i
         hr = MF_E_TRANSFORM_TYPE_NOT_SET;
     else
     {
-        *type = (IMFMediaType *)mixer->output.media_type;
+        *type = mixer->output.media_type;
         IMFMediaType_AddRef(*type);
     }
 
@@ -1030,7 +1025,7 @@ static HRESULT WINAPI video_mixer_transform_ProcessMessage(IMFTransform *iface, 
     HRESULT hr = S_OK;
     unsigned int i;
 
-    TRACE("%p, %u, %#lx.\n", iface, message, param);
+    TRACE("%p, %#x, %#lx.\n", iface, message, param);
 
     switch (message)
     {

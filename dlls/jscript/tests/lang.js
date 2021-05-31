@@ -1834,6 +1834,12 @@ ok(""+str === "test", "''+str = " + str);
 
 ok((function (){return 1;})() === 1, "(function (){return 1;})() = " + (function (){return 1;})());
 
+(function() {
+    var order = "", o = {};
+    o[order += "1,", { toString: function() { order += "2,"; } }] = (order += "3");
+    ok(order === "1,2,3", "array expression order = " + order);
+})();
+
 var re = /=(\?|%3F)/g;
 ok(re.source === "=(\\?|%3F)", "re.source = " + re.source);
 
@@ -1863,6 +1869,47 @@ tmp = getVT(Object(nullDisp));
 ok(tmp === "VT_DISPATCH", "getVT(Object(nullDisp) = " + tmp);
 tmp = Object(nullDisp).toString();
 ok(tmp === "[object Object]", "Object(nullDisp).toString() = " + tmp);
+
+function testNullPrototype() {
+    this.x = 13;
+}
+tmp = new testNullPrototype();
+ok(tmp.x === 13, "tmp.x !== 13");
+ok(!("y" in tmp), "tmp has 'y' property");
+testNullPrototype.prototype.y = 10;
+ok("y" in tmp, "tmp does not have 'y' property");
+tmp = new testNullPrototype();
+ok(tmp.y === 10, "tmp.y !== 10");
+testNullPrototype.prototype = nullDisp;
+tmp = new testNullPrototype();
+ok(tmp.x === 13, "tmp.x !== 13");
+ok(!("y" in tmp), "tmp has 'y' property");
+ok(!tmp.hasOwnProperty("y"), "tmp has 'y' property");
+ok(!tmp.propertyIsEnumerable("y"), "tmp has 'y' property enumerable");
+ok(tmp.toString() == "[object Object]", "tmp.toString returned " + tmp.toString());
+testNullPrototype.prototype = null;
+tmp = new testNullPrototype();
+ok(!tmp.hasOwnProperty("y"), "tmp has 'y' property");
+ok(!tmp.propertyIsEnumerable("y"), "tmp has 'y' property enumerable");
+ok(tmp.toString() == "[object Object]", "tmp.toString returned " + tmp.toString());
+
+testNullPrototype.prototype = 42;
+tmp = new testNullPrototype();
+ok(tmp.hasOwnProperty("x"), "tmp does not have 'x' property");
+ok(!tmp.hasOwnProperty("y"), "tmp has 'y' property");
+ok(tmp.toString() == "[object Object]", "tmp.toString returned " + tmp.toString());
+
+testNullPrototype.prototype = true;
+tmp = new testNullPrototype();
+ok(tmp.hasOwnProperty("x"), "tmp does not have 'x' property");
+ok(!tmp.hasOwnProperty("y"), "tmp has 'y' property");
+ok(tmp.toString() == "[object Object]", "tmp.toString returned " + tmp.toString());
+
+testNullPrototype.prototype = "foobar";
+tmp = new testNullPrototype();
+ok(tmp.hasOwnProperty("x"), "tmp does not have 'x' property");
+ok(!tmp.hasOwnProperty("y"), "tmp has 'y' property");
+ok(tmp.toString() == "[object Object]", "tmp.toString returned " + tmp.toString());
 
 function do_test() {}
 function nosemicolon() {} nosemicolon();

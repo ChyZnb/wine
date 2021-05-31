@@ -156,29 +156,57 @@ static HRESULT WINAPI connection_QueryInterface( _Connection *iface, REFIID riid
 
 static HRESULT WINAPI connection_GetTypeInfoCount( _Connection *iface, UINT *count )
 {
-    FIXME( "%p, %p\n", iface, count );
-    return E_NOTIMPL;
+    struct connection *connection = impl_from_Connection( iface );
+    TRACE( "%p, %p\n", connection, count );
+    *count = 1;
+    return S_OK;
 }
 
 static HRESULT WINAPI connection_GetTypeInfo( _Connection *iface, UINT index, LCID lcid, ITypeInfo **info )
 {
-    FIXME( "%p, %u, %u, %p\n", iface, index, lcid, info );
-    return E_NOTIMPL;
+    struct connection *connection = impl_from_Connection( iface );
+    TRACE( "%p, %u, %u, %p\n", connection, index, lcid, info );
+    return get_typeinfo(Connection_tid, info);
 }
 
 static HRESULT WINAPI connection_GetIDsOfNames( _Connection *iface, REFIID riid, LPOLESTR *names, UINT count,
                                                 LCID lcid, DISPID *dispid )
 {
-    FIXME( "%p, %s, %p, %u, %u, %p\n", iface, debugstr_guid(riid), names, count, lcid, dispid );
-    return E_NOTIMPL;
+    struct connection *connection = impl_from_Connection( iface );
+    HRESULT hr;
+    ITypeInfo *typeinfo;
+
+    TRACE( "%p, %s, %p, %u, %u, %p\n", connection, debugstr_guid(riid), names, count, lcid, dispid );
+
+    hr = get_typeinfo(Connection_tid, &typeinfo);
+    if(SUCCEEDED(hr))
+    {
+        hr = ITypeInfo_GetIDsOfNames(typeinfo, names, count, dispid);
+        ITypeInfo_Release(typeinfo);
+    }
+
+    return hr;
 }
 
 static HRESULT WINAPI connection_Invoke( _Connection *iface, DISPID member, REFIID riid, LCID lcid, WORD flags,
                                          DISPPARAMS *params, VARIANT *result, EXCEPINFO *excep_info, UINT *arg_err )
 {
-    FIXME( "%p, %d, %s, %d, %d, %p, %p, %p, %p\n", iface, member, debugstr_guid(riid), lcid, flags, params,
-           result, excep_info, arg_err );
-    return E_NOTIMPL;
+    struct connection *connection = impl_from_Connection( iface );
+    HRESULT hr;
+    ITypeInfo *typeinfo;
+
+    TRACE( "%p, %d, %s, %d, %d, %p, %p, %p, %p\n", connection, member, debugstr_guid(riid), lcid, flags,
+           params, result, excep_info, arg_err );
+
+    hr = get_typeinfo(Connection_tid, &typeinfo);
+    if(SUCCEEDED(hr))
+    {
+        hr = ITypeInfo_Invoke(typeinfo, &connection->Connection_iface, member, flags, params,
+                               result, excep_info, arg_err);
+        ITypeInfo_Release(typeinfo);
+    }
+
+    return hr;
 }
 
 static HRESULT WINAPI connection_get_Properties( _Connection *iface, Properties **obj )
@@ -269,72 +297,51 @@ static HRESULT WINAPI connection_Execute( _Connection *iface, BSTR command, VARI
 {
     struct connection *connection = impl_from_Connection( iface );
     HRESULT hr;
-    IOpenRowset *openrowset;
-    IDBCreateCommand *create_command = NULL;
-    ICommand *cmd = NULL;
-    ICommandText *comand_text = NULL;
-    DBROWCOUNT affected;
-    IUnknown *rowset = NULL;
-    _Recordset *recordset = NULL;
-    ADORecordsetConstruction *construct;
+    _Recordset *recordset;
+    VARIANT source, active;
+    IDispatch *dispatch;
 
     FIXME( "%p, %s, %p, 0x%08x, %p Semi-stub\n", iface, debugstr_w(command), records_affected, options, record_set );
 
     if (connection->state == adStateClosed) return MAKE_ADO_HRESULT( adErrObjectClosed );
 
-    hr = IUnknown_QueryInterface(connection->session, &IID_IOpenRowset, (void**)&openrowset);
-    if (FAILED(hr))
-        return hr;
-
-    hr = IOpenRowset_QueryInterface(openrowset, &IID_IDBCreateCommand, (void**)&create_command);
-    if (FAILED(hr))
-        goto done;
-
-    hr = IDBCreateCommand_CreateCommand(create_command, NULL, &IID_IUnknown, (IUnknown **)&cmd);
-    if (FAILED(hr))
-        goto done;
-
-    hr = ICommand_QueryInterface(cmd, &IID_ICommandText, (void**)&comand_text);
-    if (FAILED(hr))
-    {
-        FIXME("Currently only ICommandText interface is support\n");
-        goto done;
-    }
-
-    hr = ICommandText_SetCommandText(comand_text, &DBGUID_DEFAULT, command);
-    if (FAILED(hr))
-        goto done;
-
-    hr = ICommandText_Execute(comand_text, NULL, &IID_IUnknown, NULL, &affected, &rowset);
-    if (FAILED(hr))
-        goto done;
-
     hr = Recordset_create( (void**)&recordset);
     if (FAILED(hr))
-        goto done;
+    {
+        return hr;
+    }
 
-    hr = _Recordset_QueryInterface(recordset, &IID_ADORecordsetConstruction, (void**)&construct);
+    _Recordset_put_CursorLocation(recordset, connection->location);
+
+    V_VT(&source) = VT_BSTR;
+    V_BSTR(&source) = command;
+
+    hr = _Connection_QueryInterface(&connection->Connection_iface, &IID_IDispatch, (void**)&dispatch);
     if (FAILED(hr))
-        goto done;
+    {
+        _Recordset_Release(recordset);
+        return hr;
+    }
 
-    ADORecordsetConstruction_put_Rowset(construct, rowset);
-    ADORecordsetConstruction_Release(construct);
+    V_VT(&active) = VT_DISPATCH;
+    V_DISPATCH(&active) = dispatch;
+
+    hr = _Recordset_Open(recordset, source, active, adOpenDynamic, adLockPessimistic, 0);
+    VariantClear(&active);
+    if (FAILED(hr))
+    {
+        _Recordset_Release(recordset);
+        return hr;
+    }
 
     if (records_affected)
     {
         V_VT(records_affected) = VT_I4;
-        V_I4(records_affected) = affected;
+        _Recordset_get_RecordCount(recordset, &V_I4(records_affected));
     }
 
-    _Recordset_put_CursorLocation(recordset, connection->location);
     *record_set = recordset;
 
-done:
-    if (rowset) IUnknown_Release(rowset);
-    if (comand_text) ICommandText_Release(comand_text);
-    if (cmd) ICommand_Release(cmd);
-    if (create_command) IDBCreateCommand_Release(create_command);
-    if (openrowset) IOpenRowset_Release(openrowset);
     return hr;
 }
 

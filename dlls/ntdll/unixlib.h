@@ -26,7 +26,7 @@
 struct _DISPATCHER_CONTEXT;
 
 /* increment this when you change the function table */
-#define NTDLL_UNIXLIB_VERSION 111
+#define NTDLL_UNIXLIB_VERSION 121
 
 struct unix_funcs
 {
@@ -69,27 +69,17 @@ struct unix_funcs
     double        (CDECL *sqrt)( double d );
     double        (CDECL *tan)( double d );
 
-    /* environment functions */
-    USHORT *      (CDECL *get_unix_codepage_data)(void);
-    void          (CDECL *get_locales)( WCHAR *sys, WCHAR *user );
-
     /* virtual memory functions */
     void          (CDECL *virtual_release_address_space)(void);
 
-    /* file functions */
-    void          (CDECL *set_show_dot_files)( BOOL enable );
-
     /* loader functions */
     NTSTATUS      (CDECL *load_so_dll)( UNICODE_STRING *nt_name, void **module );
-    NTSTATUS      (CDECL *load_builtin_dll)( UNICODE_STRING *name, void **module, void **unix_entry,
-                                             SECTION_IMAGE_INFORMATION *image_info );
-    NTSTATUS      (CDECL *unload_builtin_dll)( void *module );
     void          (CDECL *init_builtin_dll)( void *module );
+    NTSTATUS      (CDECL *init_unix_lib)( void *module, DWORD reason, const void *ptr_in, void *ptr_out );
     NTSTATUS      (CDECL *unwind_builtin_dll)( ULONG type, struct _DISPATCHER_CONTEXT *dispatch,
                                                CONTEXT *context );
 
     /* debugging functions */
-    unsigned char (CDECL *dbg_get_channel_flags)( struct __wine_debug_channel *channel );
     const char *  (CDECL *dbg_strdup)( const char *str );
     int           (CDECL *dbg_output)( const char *str );
     int           (CDECL *dbg_header)( enum __wine_debug_class cls, struct __wine_debug_channel *channel,

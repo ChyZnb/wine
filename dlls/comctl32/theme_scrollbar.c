@@ -334,15 +334,11 @@ static void paint_scrollbar(HWND hwnd, HTHEME theme)
 
         DrawThemeBackground(theme, dc, SBP_SIZEBOX, state, &r, NULL);
     } else {
-        SCROLLBARINFO sbi;
         SCROLLINFO si;
         unsigned int thumbpos, thumbsize;
         int uppertrackstate, lowertrackstate, thumbstate;
         RECT partrect, trackrect;
         SIZE grippersize;
-
-        sbi.cbSize = sizeof(sbi);
-        GetScrollBarInfo(hwnd, OBJID_CLIENT, &sbi);
 
         si.cbSize = sizeof(si);
         si.fMask = SIF_ALL;
@@ -551,6 +547,7 @@ LRESULT CALLBACK THEMING_ScrollbarSubclassProc (HWND hwnd, UINT msg,
             theme = GetWindowTheme(hwnd);
             CloseThemeData(theme);
             OpenThemeData(hwnd, themeClass);
+            InvalidateRect(hwnd, NULL, TRUE);
             break;
 
         case WM_SYSCOLORCHANGE:

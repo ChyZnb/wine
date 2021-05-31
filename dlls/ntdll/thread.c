@@ -37,6 +37,16 @@ WINE_DECLARE_DEBUG_CHANNEL(thread);
 
 struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
 
+static int nb_debug_options;
+static struct __wine_debug_channel *debug_options;
+
+static void init_options(void)
+{
+    unsigned int offset = page_size * (sizeof(void *) / 4);
+
+    debug_options = (struct __wine_debug_channel *)((char *)NtCurrentTeb()->Peb + offset);
+    while (debug_options[nb_debug_options].name[0]) nb_debug_options++;
+}
 
 /***********************************************************************
  *		__wine_dbg_get_channel_flags  (NTDLL.@)
@@ -45,7 +55,25 @@ struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
  */
 unsigned char __cdecl __wine_dbg_get_channel_flags( struct __wine_debug_channel *channel )
 {
-    return unix_funcs->dbg_get_channel_flags( channel );
+    int min, max, pos, res;
+    unsigned char default_flags;
+
+    if (!debug_options) init_options();
+
+    min = 0;
+    max = nb_debug_options - 1;
+    while (min <= max)
+    {
+        pos = (min + max) / 2;
+        res = strcmp( channel->name, debug_options[pos].name );
+        if (!res) return debug_options[pos].flags;
+        if (res < 0) max = pos - 1;
+        else min = pos + 1;
+    }
+    /* no option for this channel */
+    default_flags = debug_options[nb_debug_options].flags;
+    if (channel->flags & (1 << __WINE_DBCL_INIT)) channel->flags = default_flags;
+    return default_flags;
 }
 
 /***********************************************************************
@@ -150,7 +178,7 @@ void WINAPI RtlUserThreadStart( PRTL_THREAD_START_ROUTINE entry, void *arg )
  *              RtlCreateUserThread   (NTDLL.@)
  */
 NTSTATUS WINAPI RtlCreateUserThread( HANDLE process, SECURITY_DESCRIPTOR *descr,
-                                     BOOLEAN suspended, PVOID stack_addr,
+                                     BOOLEAN suspended, ULONG zero_bits,
                                      SIZE_T stack_reserve, SIZE_T stack_commit,
                                      PRTL_THREAD_START_ROUTINE start, void *param,
                                      HANDLE *handle_ptr, CLIENT_ID *id )
@@ -181,7 +209,7 @@ NTSTATUS WINAPI RtlCreateUserThread( HANDLE process, SECURITY_DESCRIPTOR *descr,
     if (actctx) flags |= THREAD_CREATE_FLAGS_CREATE_SUSPENDED;
 
     status = NtCreateThreadEx( &handle, THREAD_ALL_ACCESS, &attr, process, start, param,
-                               flags, 0, stack_commit, stack_reserve, attr_list );
+                               flags, zero_bits, stack_commit, stack_reserve, attr_list );
     if (!status)
     {
         if (actctx)
@@ -241,7 +269,7 @@ TEB_ACTIVE_FRAME * WINAPI RtlGetFrame(void)
  ***********************************************************************/
 
 
-static GLOBAL_FLS_DATA fls_data;
+static GLOBAL_FLS_DATA fls_data = { { NULL }, { &fls_data.fls_list_head, &fls_data.fls_list_head } };
 
 static RTL_CRITICAL_SECTION fls_section;
 static RTL_CRITICAL_SECTION_DEBUG fls_critsect_debug =
@@ -253,11 +281,6 @@ static RTL_CRITICAL_SECTION_DEBUG fls_critsect_debug =
 static RTL_CRITICAL_SECTION fls_section = { &fls_critsect_debug, -1, 0, 0, 0, 0 };
 
 #define MAX_FLS_DATA_COUNT 0xff0
-
-void init_global_fls_data(void)
-{
-    InitializeListHead( &fls_data.fls_list_head );
-}
 
 static void lock_fls_data(void)
 {

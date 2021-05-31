@@ -25,6 +25,9 @@
 static NTSTATUS (WINAPI * pNtQuerySystemInformation)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
 static NTSTATUS (WINAPI * pNtSetSystemInformation)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG);
 static NTSTATUS (WINAPI * pRtlGetNativeSystemInformation)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+static USHORT   (WINAPI * pRtlWow64GetCurrentMachine)(void);
+static NTSTATUS (WINAPI * pRtlWow64GetProcessMachines)(HANDLE,WORD*,WORD*);
+static NTSTATUS (WINAPI * pRtlWow64IsWowGuestMachineSupported)(USHORT,BOOLEAN*);
 static NTSTATUS (WINAPI * pNtQuerySystemInformationEx)(SYSTEM_INFORMATION_CLASS, void*, ULONG, void*, ULONG, ULONG*);
 static NTSTATUS (WINAPI * pNtPowerInformation)(POWER_INFORMATION_LEVEL, PVOID, ULONG, PVOID, ULONG);
 static NTSTATUS (WINAPI * pNtQueryInformationProcess)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
@@ -46,6 +49,9 @@ static NTSTATUS (WINAPI * pNtQueryObject)(HANDLE, OBJECT_INFORMATION_CLASS, void
 static NTSTATUS (WINAPI * pNtCreateDebugObject)( HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *, ULONG );
 static NTSTATUS (WINAPI * pNtSetInformationDebugObject)(HANDLE,DEBUGOBJECTINFOCLASS,PVOID,ULONG,ULONG*);
 static NTSTATUS (WINAPI * pDbgUiConvertStateChangeStructure)(DBGUI_WAIT_STATE_CHANGE*,DEBUG_EVENT*);
+#ifdef _WIN64
+static NTSTATUS (WINAPI * pRtlWow64GetCpuAreaInfo)( WOW64_CPURESERVED *cpu, ULONG reserved, WOW64_CPU_AREA_INFO *info );
+#endif
 
 static BOOL is_wow64;
 
@@ -64,7 +70,6 @@ static inline DWORD_PTR get_affinity_mask(DWORD num_cpus)
     p ## func = (void*)GetProcAddress(hntdll, #func); \
     if(!p ## func) { \
       trace("GetProcAddress(%s) failed\n", #func); \
-      return FALSE; \
     } \
   } while(0)
 
@@ -73,15 +78,19 @@ static inline DWORD_PTR get_affinity_mask(DWORD num_cpus)
 #define FIRM 0x4649524D
 #define RSMB 0x52534D42
 
-static BOOL InitFunctionPtrs(void)
+static void InitFunctionPtrs(void)
 {
     /* All needed functions are NT based, so using GetModuleHandle is a good check */
     HMODULE hntdll = GetModuleHandleA("ntdll");
     HMODULE hkernel32 = GetModuleHandleA("kernel32");
 
     NTDLL_GET_PROC(NtQuerySystemInformation);
+    NTDLL_GET_PROC(NtQuerySystemInformationEx);
     NTDLL_GET_PROC(NtSetSystemInformation);
     NTDLL_GET_PROC(RtlGetNativeSystemInformation);
+    NTDLL_GET_PROC(RtlWow64GetCurrentMachine);
+    NTDLL_GET_PROC(RtlWow64GetProcessMachines);
+    NTDLL_GET_PROC(RtlWow64IsWowGuestMachineSupported);
     NTDLL_GET_PROC(NtPowerInformation);
     NTDLL_GET_PROC(NtQueryInformationProcess);
     NTDLL_GET_PROC(NtQueryInformationThread);
@@ -97,24 +106,17 @@ static BOOL InitFunctionPtrs(void)
     NTDLL_GET_PROC(NtQueryObject);
     NTDLL_GET_PROC(NtCreateDebugObject);
     NTDLL_GET_PROC(NtSetInformationDebugObject);
+    NTDLL_GET_PROC(NtGetCurrentProcessorNumber);
     NTDLL_GET_PROC(DbgUiConvertStateChangeStructure);
-
-    /* not present before XP */
-    pNtGetCurrentProcessorNumber = (void *) GetProcAddress(hntdll, "NtGetCurrentProcessorNumber");
+#ifdef _WIN64
+    NTDLL_GET_PROC(RtlWow64GetCpuAreaInfo);
+#endif
 
     pIsWow64Process = (void *)GetProcAddress(hkernel32, "IsWow64Process");
     if (!pIsWow64Process || !pIsWow64Process( GetCurrentProcess(), &is_wow64 )) is_wow64 = FALSE;
 
     pGetSystemDEPPolicy = (void *)GetProcAddress(hkernel32, "GetSystemDEPPolicy");
-
-    /* starting with Win7 */
-    pNtQuerySystemInformationEx = (void *) GetProcAddress(hntdll, "NtQuerySystemInformationEx");
-    if (!pNtQuerySystemInformationEx)
-        win_skip("NtQuerySystemInformationEx() is not supported, some tests will be skipped.\n");
-
     pGetLogicalProcessorInformationEx = (void *) GetProcAddress(hkernel32, "GetLogicalProcessorInformationEx");
-
-    return TRUE;
 }
 
 static void test_query_basic(void)
@@ -202,8 +204,9 @@ static void test_query_cpu(void)
     ok( sizeof(sci) == ReturnLength, "Inconsistent length %d\n", ReturnLength);
 
     /* Check if we have some return values */
-    if (winetest_debug > 1) trace("Processor FeatureSet : %08x\n", sci.FeatureSet);
-    ok( sci.FeatureSet != 0, "Expected some features for this processor, got %08x\n", sci.FeatureSet);
+    if (winetest_debug > 1) trace("Processor FeatureSet : %08x\n", sci.ProcessorFeatureBits);
+    ok( sci.ProcessorFeatureBits != 0, "Expected some features for this processor, got %08x\n",
+        sci.ProcessorFeatureBits);
 }
 
 static void test_query_performance(void)
@@ -542,11 +545,14 @@ static void test_query_handle(void)
     ULONG SystemInformationLength = sizeof(SYSTEM_HANDLE_INFORMATION);
     SYSTEM_HANDLE_INFORMATION* shi = HeapAlloc(GetProcessHeap(), 0, SystemInformationLength);
     HANDLE EventHandle;
-    BOOL found;
+    BOOL found, ret;
     INT i;
 
     EventHandle = CreateEventA(NULL, FALSE, FALSE, NULL);
     ok( EventHandle != NULL, "CreateEventA failed %u\n", GetLastError() );
+    ret = SetHandleInformation(EventHandle, HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE,
+            HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE);
+    ok(ret, "got error %u\n", GetLastError());
 
     /* Request the needed length : a SystemInformationLength greater than one struct sets ReturnLength */
     ReturnLength = 0xdeadbeef;
@@ -581,11 +587,22 @@ static void test_query_handle(void)
         goto done;
     }
 
-    for (i = 0, found = FALSE; i < shi->Count && !found; i++)
-        found = (shi->Handle[i].OwnerPid == GetCurrentProcessId()) &&
-                ((HANDLE)(ULONG_PTR)shi->Handle[i].HandleValue == EventHandle);
+    found = FALSE;
+    for (i = 0; i < shi->Count; i++)
+    {
+        if (shi->Handle[i].OwnerPid == GetCurrentProcessId() &&
+                (HANDLE)(ULONG_PTR)shi->Handle[i].HandleValue == EventHandle)
+        {
+            ok(shi->Handle[i].HandleFlags == (OBJ_INHERIT | OBJ_PROTECT_CLOSE),
+                    "got attributes %#x\n", shi->Handle[i].HandleFlags);
+            found = TRUE;
+            break;
+        }
+    }
     ok( found, "Expected to find event handle %p (pid %x) in handle list\n", EventHandle, GetCurrentProcessId() );
 
+    ret = SetHandleInformation(EventHandle, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0);
+    ok(ret, "got error %u\n", GetLastError());
     CloseHandle(EventHandle);
 
     ReturnLength = 0xdeadbeef;
@@ -609,6 +626,84 @@ done:
     HeapFree( GetProcessHeap(), 0, shi);
 }
 
+static void test_query_handle_ex(void)
+{
+    SYSTEM_HANDLE_INFORMATION_EX *info = malloc(sizeof(SYSTEM_HANDLE_INFORMATION_EX));
+    ULONG size, expect_size;
+    NTSTATUS status;
+    unsigned int i;
+    HANDLE event;
+    BOOL found, ret;
+
+    event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    ok(event != NULL, "failed to create event, error %u\n", GetLastError());
+    ret = SetHandleInformation(event, HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE,
+            HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE);
+    ok(ret, "got error %u\n", GetLastError());
+
+    size = 0;
+    status = pNtQuerySystemInformation(SystemExtendedHandleInformation, info, sizeof(SYSTEM_HANDLE_INFORMATION_EX), &size);
+    ok(status == STATUS_INFO_LENGTH_MISMATCH, "got %#x\n", status);
+    ok(size > sizeof(SYSTEM_HANDLE_INFORMATION_EX), "got size %u\n", size);
+
+    while (status == STATUS_INFO_LENGTH_MISMATCH)
+    {
+        info = realloc(info, size);
+        status = pNtQuerySystemInformation(SystemExtendedHandleInformation, info, size, &size);
+    }
+    ok(!status, "got %#x\n", status);
+    expect_size = FIELD_OFFSET(SYSTEM_HANDLE_INFORMATION_EX, Handles[info->NumberOfHandles]);
+    ok(size == expect_size, "expected size %u, got %u\n", expect_size, size);
+    ok(info->NumberOfHandles > 1, "got %Iu handles\n", info->NumberOfHandles);
+
+    found = FALSE;
+    for (i = 0; i < info->NumberOfHandles; ++i)
+    {
+        if (info->Handles[i].UniqueProcessId == GetCurrentProcessId()
+                && (HANDLE)info->Handles[i].HandleValue == event)
+        {
+            ok(info->Handles[i].HandleAttributes == (OBJ_INHERIT | OBJ_PROTECT_CLOSE),
+                    "got flags %#x\n", info->Handles[i].HandleAttributes);
+            ok(info->Handles[i].GrantedAccess == EVENT_ALL_ACCESS, "got access %#x\n", info->Handles[i].GrantedAccess);
+            found = TRUE;
+        }
+        ok(!info->Handles[i].CreatorBackTraceIndex, "got backtrace index %u\n", info->Handles[i].CreatorBackTraceIndex);
+    }
+    ok(found, "event handle not found\n");
+
+    ret = SetHandleInformation(event, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0);
+    ok(ret, "got error %u\n", GetLastError());
+    CloseHandle(event);
+
+    status = pNtQuerySystemInformation(SystemExtendedHandleInformation, info, size, &size);
+    while (status == STATUS_INFO_LENGTH_MISMATCH)
+    {
+        info = realloc(info, size);
+        status = pNtQuerySystemInformation(SystemExtendedHandleInformation, info, size, &size);
+    }
+    ok(!status, "got %#x\n", status);
+    expect_size = FIELD_OFFSET(SYSTEM_HANDLE_INFORMATION_EX, Handles[info->NumberOfHandles]);
+    ok(size == expect_size, "expected size %u, got %u\n", expect_size, size);
+    ok(info->NumberOfHandles > 1, "got %Iu handles\n", info->NumberOfHandles);
+
+    found = FALSE;
+    for (i = 0; i < info->NumberOfHandles; ++i)
+    {
+        if (info->Handles[i].UniqueProcessId == GetCurrentProcessId()
+                && (HANDLE)info->Handles[i].HandleValue == event)
+        {
+            found = TRUE;
+            break;
+        }
+    }
+    ok(!found, "event handle found\n");
+
+    status = pNtQuerySystemInformation(SystemExtendedHandleInformation, NULL, sizeof(SYSTEM_HANDLE_INFORMATION_EX), &size);
+    ok( status == STATUS_ACCESS_VIOLATION, "Expected STATUS_ACCESS_VIOLATION, got %08x\n", status );
+
+    free(info);
+}
+
 static void test_query_cache(void)
 {
     NTSTATUS status;
@@ -623,21 +718,21 @@ static void test_query_cache(void)
     for (i = sizeof(buffer); i>= expected; i--)
     {
         ReturnLength = 0xdeadbeef;
-        status = pNtQuerySystemInformation(SystemCacheInformation, sci, i, &ReturnLength);
+        status = pNtQuerySystemInformation(SystemFileCacheInformation, sci, i, &ReturnLength);
         ok(!status && (ReturnLength == expected),
             "%d: got 0x%x and %u (expected STATUS_SUCCESS and %u)\n", i, status, ReturnLength, expected);
     }
 
     /* buffer too small for the full result.
        Up to win7, the function succeeds with a partial result. */
-    status = pNtQuerySystemInformation(SystemCacheInformation, sci, i, &ReturnLength);
+    status = pNtQuerySystemInformation(SystemFileCacheInformation, sci, i, &ReturnLength);
     if (!status)
     {
         expected = offsetof(SYSTEM_CACHE_INFORMATION, MinimumWorkingSet);
         for (; i>= expected; i--)
         {
             ReturnLength = 0xdeadbeef;
-            status = pNtQuerySystemInformation(SystemCacheInformation, sci, i, &ReturnLength);
+            status = pNtQuerySystemInformation(SystemFileCacheInformation, sci, i, &ReturnLength);
             ok(!status && (ReturnLength == expected),
                 "%d: got 0x%x and %u (expected STATUS_SUCCESS and %u)\n", i, status, ReturnLength, expected);
         }
@@ -645,7 +740,7 @@ static void test_query_cache(void)
 
     /* buffer too small for the result, this call will always fail */
     ReturnLength = 0xdeadbeef;
-    status = pNtQuerySystemInformation(SystemCacheInformation, sci, i, &ReturnLength);
+    status = pNtQuerySystemInformation(SystemFileCacheInformation, sci, i, &ReturnLength);
     ok( status == STATUS_INFO_LENGTH_MISMATCH &&
         ((ReturnLength == expected) || broken(!ReturnLength) || broken(ReturnLength == 0xfffffff0)),
         "%d: got 0x%x and %u (expected STATUS_INFO_LENGTH_MISMATCH and %u)\n", i, status, ReturnLength, expected);
@@ -653,7 +748,7 @@ static void test_query_cache(void)
     if (0) {
         /* this crashes on some vista / win7 machines */
         ReturnLength = 0xdeadbeef;
-        status = pNtQuerySystemInformation(SystemCacheInformation, sci, 0, &ReturnLength);
+        status = pNtQuerySystemInformation(SystemFileCacheInformation, sci, 0, &ReturnLength);
         ok( status == STATUS_INFO_LENGTH_MISMATCH &&
             ((ReturnLength == expected) || broken(!ReturnLength) || broken(ReturnLength == 0xfffffff0)),
             "0: got 0x%x and %u (expected STATUS_INFO_LENGTH_MISMATCH and %u)\n", status, ReturnLength, expected);
@@ -1005,6 +1100,89 @@ static void test_query_logicalprocex(void)
     HeapFree(GetProcessHeap(), 0, infoex_cache);
     HeapFree(GetProcessHeap(), 0, infoex_package);
     HeapFree(GetProcessHeap(), 0, infoex_group);
+}
+
+static void test_query_cpusetinfo(void)
+{
+    SYSTEM_CPU_SET_INFORMATION *info;
+    unsigned int i, cpu_count;
+    ULONG len, expected_len;
+    NTSTATUS status;
+    SYSTEM_INFO si;
+    HANDLE process;
+
+    if (!pNtQuerySystemInformationEx)
+        return;
+
+    GetSystemInfo(&si);
+    cpu_count = si.dwNumberOfProcessors;
+    expected_len = cpu_count * sizeof(*info);
+
+    process = GetCurrentProcess();
+
+    status = pNtQuerySystemInformationEx(SystemCpuSetInformation, &process, sizeof(process), NULL, 0, &len);
+    if (status == STATUS_INVALID_INFO_CLASS)
+    {
+        win_skip("SystemCpuSetInformation is not supported\n");
+        return;
+    }
+
+    ok(status == STATUS_BUFFER_TOO_SMALL, "Got unexpected status %#x.\n", status);
+    ok(len == expected_len, "Got unexpected length %u.\n", len);
+
+    len = 0xdeadbeef;
+    status = pNtQuerySystemInformation(SystemCpuSetInformation, NULL, 0, &len);
+    ok(status == STATUS_INVALID_PARAMETER || status == STATUS_INVALID_INFO_CLASS,
+            "Got unexpected status %#x.\n", status);
+    ok(len == 0xdeadbeef, "Got unexpected len %u.\n", len);
+
+    len = 0xdeadbeef;
+    process = (HANDLE)0xdeadbeef;
+    status = pNtQuerySystemInformationEx(SystemCpuSetInformation, &process, sizeof(process), NULL, 0, &len);
+    ok(status == STATUS_INVALID_HANDLE, "Got unexpected status %#x.\n", status);
+    ok(len == 0xdeadbeef, "Got unexpected length %u.\n", len);
+
+    len = 0xdeadbeef;
+    process = NULL;
+    status = pNtQuerySystemInformationEx(SystemCpuSetInformation, &process, 4 * sizeof(process), NULL, 0, &len);
+    ok((status == STATUS_INVALID_PARAMETER && len == 0xdeadbeef)
+            || (status == STATUS_BUFFER_TOO_SMALL && len == expected_len),
+            "Got unexpected status %#x, length %u.\n", status, len);
+
+    len = 0xdeadbeef;
+    status = pNtQuerySystemInformationEx(SystemCpuSetInformation, NULL, sizeof(process), NULL, 0, &len);
+    ok(status == STATUS_INVALID_PARAMETER, "Got unexpected status %#x.\n", status);
+    ok(len == 0xdeadbeef, "Got unexpected length %u.\n", len);
+
+    status = pNtQuerySystemInformationEx(SystemCpuSetInformation, &process, sizeof(process), NULL, 0, &len);
+    ok(status == STATUS_BUFFER_TOO_SMALL, "Got unexpected status %#x.\n", status);
+    ok(len == expected_len, "Got unexpected length %u.\n", len);
+
+    len = 0xdeadbeef;
+    status = pNtQuerySystemInformationEx(SystemCpuSetInformation, &process, sizeof(process), NULL,
+            expected_len, &len);
+    ok(status == STATUS_ACCESS_VIOLATION, "Got unexpected status %#x.\n", status);
+    ok(len == 0xdeadbeef, "Got unexpected length %u.\n", len);
+
+    info = malloc(expected_len);
+    len = 0;
+    status = pNtQuerySystemInformationEx(SystemCpuSetInformation, &process, sizeof(process), info, expected_len, &len);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#x.\n", status);
+    ok(len == expected_len, "Got unexpected length %u.\n", len);
+
+    for (i = 0; i < cpu_count; ++i)
+    {
+        SYSTEM_CPU_SET_INFORMATION *d = &info[i];
+
+        ok(d->Size == sizeof(*d), "Got unexpected size %u, i %u.\n", d->Size, i);
+        ok(d->Type == CpuSetInformation, "Got unexpected type %u, i %u.\n", d->Type, i);
+        ok(d->CpuSet.Id == 0x100 + i, "Got unexpected Id %#x, i %u.\n", d->CpuSet.Id, i);
+        ok(!d->CpuSet.Group, "Got unexpected Group %u, i %u.\n", d->CpuSet.Group, i);
+        ok(d->CpuSet.LogicalProcessorIndex == i, "Got unexpected LogicalProcessorIndex %u, i %u.\n",
+                d->CpuSet.LogicalProcessorIndex, i);
+        ok(!d->CpuSet.AllFlags, "Got unexpected AllFlags %#x, i %u.\n", d->CpuSet.AllFlags, i);
+    }
+    free(info);
 }
 
 static void test_query_firmware(void)
@@ -2709,6 +2887,161 @@ static void test_query_data_alignment(void)
 #endif
 }
 
+static void test_process_architecture( HANDLE process, USHORT expect_machine, USHORT expect_native )
+{
+    NTSTATUS status;
+    ULONG i, len, buffer[8];
+
+    len = 0xdead;
+    status = pNtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, &process, sizeof(process),
+                                          &buffer, sizeof(buffer), &len );
+    ok( !status, "failed %x\n", status );
+    ok( !(len & 3), "wrong len %x\n", len );
+    len /= sizeof(DWORD);
+    for (i = 0; i < len - 1; i++)
+    {
+        USHORT flags = HIWORD(buffer[i]);
+        USHORT machine = LOWORD(buffer[i]);
+
+        if (flags & 8)
+            ok( machine == expect_machine, "wrong current machine %x\n", buffer[i]);
+        else
+            ok( machine != expect_machine, "wrong machine %x\n", buffer[i]);
+
+        /* FIXME: not quite sure what the other flags mean,
+         * observed on amd64 Windows: (flags & 7) == 7 for MACHINE_AMD64 and 2 for MACHINE_I386
+         */
+        if (flags & 4)
+            ok( machine == expect_native, "wrong native machine %x\n", buffer[i]);
+        else
+            ok( machine != expect_native, "wrong machine %x\n", buffer[i]);
+    }
+    ok( !buffer[i], "missing terminating null\n" );
+
+    len = i * sizeof(DWORD);
+    status = pNtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, &process, sizeof(process),
+                                          &buffer, len, &len );
+    ok( status == STATUS_BUFFER_TOO_SMALL, "failed %x\n", status );
+    ok( len == (i + 1) * sizeof(DWORD), "wrong len %u\n", len );
+
+    if (pRtlWow64GetProcessMachines)
+    {
+        USHORT current = 0xdead, native = 0xbeef;
+        status = pRtlWow64GetProcessMachines( process, &current, &native );
+        ok( !status, "failed %x\n", status );
+        if (expect_machine == expect_native)
+            ok( current == 0, "wrong current machine %x / %x\n", current, expect_machine );
+        else
+            ok( current == expect_machine, "wrong current machine %x / %x\n", current, expect_machine );
+        ok( native == expect_native, "wrong native machine %x / %x\n", native, expect_native );
+    }
+}
+
+static void test_query_architectures(void)
+{
+#ifdef __i386__
+    USHORT current_machine = IMAGE_FILE_MACHINE_I386;
+    USHORT native_machine = is_wow64 ? IMAGE_FILE_MACHINE_AMD64 : IMAGE_FILE_MACHINE_I386;
+#elif defined __x86_64__
+    USHORT current_machine = IMAGE_FILE_MACHINE_AMD64;
+    USHORT native_machine = IMAGE_FILE_MACHINE_AMD64;
+#elif defined __arm__
+    USHORT current_machine = IMAGE_FILE_MACHINE_ARMNT;
+    USHORT native_machine = is_wow64 ? IMAGE_FILE_MACHINE_ARM64 : IMAGE_FILE_MACHINE_ARMNT;
+#elif defined __aarch64__
+    USHORT current_machine = IMAGE_FILE_MACHINE_ARM64;
+    USHORT native_machine = IMAGE_FILE_MACHINE_ARM64;
+#else
+    USHORT current_machine = 0;
+    USHORT native_machine = 0;
+#endif
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si = { sizeof(si) };
+    NTSTATUS status;
+    HANDLE process;
+    ULONG len, buffer[8];
+
+    if (!pNtQuerySystemInformationEx) return;
+
+    process = GetCurrentProcess();
+    status = pNtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, &process, sizeof(process),
+                                          &buffer, sizeof(buffer), &len );
+    if (status == STATUS_INVALID_INFO_CLASS)
+    {
+        win_skip( "SystemSupportedProcessorArchitectures not supported\n" );
+        return;
+    }
+    ok( !status, "failed %x\n", status );
+
+    process = (HANDLE)0xdeadbeef;
+    status = pNtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, &process, sizeof(process),
+                                          &buffer, sizeof(buffer), &len );
+    ok( status == STATUS_INVALID_HANDLE, "failed %x\n", status );
+    process = (HANDLE)0xdeadbeef;
+    status = pNtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, &process, 3,
+                                          &buffer, sizeof(buffer), &len );
+    ok( status == STATUS_INVALID_PARAMETER || broken(status == STATUS_INVALID_HANDLE),
+        "failed %x\n", status );
+    process = GetCurrentProcess();
+    status = pNtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, &process, 3,
+                                          &buffer, sizeof(buffer), &len );
+    ok( status == STATUS_INVALID_PARAMETER || broken( status == STATUS_SUCCESS),
+        "failed %x\n", status );
+    status = pNtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, NULL, 0,
+                                          &buffer, sizeof(buffer), &len );
+    ok( status == STATUS_INVALID_PARAMETER, "failed %x\n", status );
+
+    test_process_architecture( GetCurrentProcess(), current_machine, native_machine );
+    test_process_architecture( 0, 0, native_machine );
+
+    if (CreateProcessA( "C:\\Program Files\\Internet Explorer\\iexplore.exe", NULL, NULL, NULL,
+                        FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi ))
+    {
+        test_process_architecture( pi.hProcess, native_machine, native_machine );
+        TerminateProcess( pi.hProcess, 0 );
+        CloseHandle( pi.hProcess );
+        CloseHandle( pi.hThread );
+    }
+    if (CreateProcessA( "C:\\Program Files (x86)\\Internet Explorer\\iexplore.exe", NULL, NULL, NULL,
+                        FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi ))
+    {
+        test_process_architecture( pi.hProcess, IMAGE_FILE_MACHINE_I386, native_machine );
+        TerminateProcess( pi.hProcess, 0 );
+        CloseHandle( pi.hProcess );
+        CloseHandle( pi.hThread );
+    }
+
+    if (pRtlWow64GetCurrentMachine)
+    {
+        USHORT machine = pRtlWow64GetCurrentMachine();
+        ok( machine == current_machine, "wrong machine %x / %x\n", machine, current_machine );
+    }
+    if (pRtlWow64IsWowGuestMachineSupported)
+    {
+        BOOLEAN ret = 0xcc;
+        status = pRtlWow64IsWowGuestMachineSupported( IMAGE_FILE_MACHINE_I386, &ret );
+        ok( !status, "failed %x\n", status );
+        ok( ret == (native_machine == IMAGE_FILE_MACHINE_AMD64 ||
+                    native_machine == IMAGE_FILE_MACHINE_ARM64), "wrong result %u\n", ret );
+        ret = 0xcc;
+        status = pRtlWow64IsWowGuestMachineSupported( IMAGE_FILE_MACHINE_ARMNT, &ret );
+        ok( !status, "failed %x\n", status );
+        ok( ret == (native_machine == IMAGE_FILE_MACHINE_ARM64), "wrong result %u\n", ret );
+        ret = 0xcc;
+        status = pRtlWow64IsWowGuestMachineSupported( IMAGE_FILE_MACHINE_AMD64, &ret );
+        ok( !status, "failed %x\n", status );
+        ok( !ret, "wrong result %u\n", ret );
+        ret = 0xcc;
+        status = pRtlWow64IsWowGuestMachineSupported( IMAGE_FILE_MACHINE_ARM64, &ret );
+        ok( !status, "failed %x\n", status );
+        ok( !ret, "wrong result %u\n", ret );
+        ret = 0xcc;
+        status = pRtlWow64IsWowGuestMachineSupported( 0xdead, &ret );
+        ok( !status, "failed %x\n", status );
+        ok( !ret, "wrong result %u\n", ret );
+    }
+}
+
 static void test_thread_lookup(void)
 {
     OBJECT_BASIC_INFORMATION obj_info;
@@ -2796,7 +3129,207 @@ static void test_thread_info(void)
 
 static void test_wow64(void)
 {
-#ifndef _WIN64
+    PROCESS_BASIC_INFORMATION proc_info;
+    THREAD_BASIC_INFORMATION info;
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si = {0};
+    NTSTATUS status;
+    void *redir;
+    SIZE_T res;
+    TEB teb;
+    PEB peb;
+    TEB32 teb32;
+    PEB32 peb32;
+    RTL_USER_PROCESS_PARAMETERS params;
+    RTL_USER_PROCESS_PARAMETERS32 params32;
+
+    Wow64DisableWow64FsRedirection( &redir );
+
+    if (CreateProcessA( "C:\\windows\\syswow64\\notepad.exe", NULL, NULL, NULL,
+                        FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi ))
+    {
+        memset( &info, 0xcc, sizeof(info) );
+        status = pNtQueryInformationThread( pi.hThread, ThreadBasicInformation, &info, sizeof(info), NULL );
+        ok( !status, "ThreadBasicInformation failed %x\n", status );
+        if (!ReadProcessMemory( pi.hProcess, info.TebBaseAddress, &teb, sizeof(teb), &res )) res = 0;
+        ok( res == sizeof(teb), "wrong len %lx\n", res );
+        ok( teb.Tib.Self == info.TebBaseAddress, "wrong teb %p / %p\n", teb.Tib.Self, info.TebBaseAddress );
+        if (is_wow64)
+        {
+            ok( !!teb.GdiBatchCount, "GdiBatchCount not set\n" );
+            ok( (char *)info.TebBaseAddress + teb.WowTebOffset == ULongToPtr(teb.GdiBatchCount) ||
+                broken(!NtCurrentTeb()->WowTebOffset),  /* pre-win10 */
+                "wrong teb offset %d\n", teb.WowTebOffset );
+        }
+        else
+        {
+            ok( !teb.GdiBatchCount, "GdiBatchCount set\n" );
+            ok( teb.WowTebOffset == 0x2000 ||
+                broken( !teb.WowTebOffset || teb.WowTebOffset == 1 ),  /* pre-win10 */
+                "wrong teb offset %d\n", teb.WowTebOffset );
+            ok( (char *)teb.Tib.ExceptionList == (char *)info.TebBaseAddress + 0x2000,
+                "wrong Tib.ExceptionList %p / %p\n",
+                (char *)teb.Tib.ExceptionList, (char *)info.TebBaseAddress + 0x2000 );
+            if (!ReadProcessMemory( pi.hProcess, teb.Tib.ExceptionList, &teb32, sizeof(teb32), &res )) res = 0;
+            ok( res == sizeof(teb32), "wrong len %lx\n", res );
+            ok( (char *)ULongToPtr(teb32.Peb) == (char *)teb.Peb + 0x1000 ||
+                broken( ULongToPtr(teb32.Peb) != teb.Peb ), /* vista */
+                "wrong peb %p / %p\n", ULongToPtr(teb32.Peb), teb.Peb );
+        }
+
+        status = pNtQueryInformationProcess( pi.hProcess, ProcessBasicInformation,
+                                             &proc_info, sizeof(proc_info), NULL );
+        ok( !status, "ProcessBasicInformation failed %x\n", status );
+        ok( proc_info.PebBaseAddress == teb.Peb, "wrong peb %p / %p\n", proc_info.PebBaseAddress, teb.Peb );
+
+        if (!ReadProcessMemory( pi.hProcess, proc_info.PebBaseAddress, &peb, sizeof(peb), &res )) res = 0;
+        ok( res == sizeof(peb), "wrong len %lx\n", res );
+        ok( !peb.BeingDebugged, "BeingDebugged is %u\n", peb.BeingDebugged );
+        if (!is_wow64)
+        {
+            if (!ReadProcessMemory( pi.hProcess, ULongToPtr(teb32.Peb), &peb32, sizeof(peb32), &res )) res = 0;
+            ok( res == sizeof(peb32), "wrong len %lx\n", res );
+            ok( !peb32.BeingDebugged, "BeingDebugged is %u\n", peb32.BeingDebugged );
+        }
+
+        if (!ReadProcessMemory( pi.hProcess, peb.ProcessParameters, &params, sizeof(params), &res )) res = 0;
+        ok( res == sizeof(params), "wrong len %lx\n", res );
+#define CHECK_STR(name) \
+        ok( (char *)params.name.Buffer >= (char *)peb.ProcessParameters && \
+            (char *)params.name.Buffer < (char *)peb.ProcessParameters + params.Size, \
+            "wrong " #name " ptr %p / %p-%p\n", params.name.Buffer, peb.ProcessParameters, \
+            (char *)peb.ProcessParameters + params.Size )
+        CHECK_STR( ImagePathName );
+        CHECK_STR( CommandLine );
+        CHECK_STR( WindowTitle );
+        CHECK_STR( Desktop );
+        CHECK_STR( ShellInfo );
+#undef CHECK_STR
+        if (!is_wow64)
+        {
+            ok( peb32.ProcessParameters && ULongToPtr(peb32.ProcessParameters) != peb.ProcessParameters,
+                "wrong ptr32 %p / %p\n", ULongToPtr(peb32.ProcessParameters), peb.ProcessParameters );
+            if (!ReadProcessMemory( pi.hProcess, ULongToPtr(peb32.ProcessParameters), &params32, sizeof(params32), &res )) res = 0;
+            ok( res == sizeof(params32), "wrong len %lx\n", res );
+#define CHECK_STR(name) \
+            ok( ULongToPtr(params32.name.Buffer) >= ULongToPtr(peb32.ProcessParameters) && \
+                ULongToPtr(params32.name.Buffer) < ULongToPtr(peb32.ProcessParameters + params32.Size), \
+                "wrong " #name " ptr %x / %x-%x\n", params32.name.Buffer, peb32.ProcessParameters, \
+                peb32.ProcessParameters + params.Size ); \
+            ok( params32.name.Length == params.name.Length, "wrong " #name "len %u / %u\n", \
+                params32.name.Length, params.name.Length )
+            CHECK_STR( ImagePathName );
+            CHECK_STR( CommandLine );
+            CHECK_STR( WindowTitle );
+            CHECK_STR( Desktop );
+            CHECK_STR( ShellInfo );
+#undef CHECK_STR
+            ok( params32.EnvironmentSize == params.EnvironmentSize, "wrong size %u / %lu\n",
+                params32.EnvironmentSize, params.EnvironmentSize );
+        }
+
+        ok( DebugActiveProcess( pi.dwProcessId ), "debugging failed\n" );
+        if (!ReadProcessMemory( pi.hProcess, proc_info.PebBaseAddress, &peb, sizeof(peb), &res )) res = 0;
+        ok( res == sizeof(peb), "wrong len %lx\n", res );
+        ok( peb.BeingDebugged == 1, "BeingDebugged is %u\n", peb.BeingDebugged );
+        if (!is_wow64)
+        {
+            if (!ReadProcessMemory( pi.hProcess, ULongToPtr(teb32.Peb), &peb32, sizeof(peb32), &res )) res = 0;
+            ok( res == sizeof(peb32), "wrong len %lx\n", res );
+            ok( peb32.BeingDebugged == 1, "BeingDebugged is %u\n", peb32.BeingDebugged );
+        }
+
+        TerminateProcess( pi.hProcess, 0 );
+        CloseHandle( pi.hProcess );
+        CloseHandle( pi.hThread );
+    }
+
+    if (CreateProcessA( "C:\\windows\\system32\\notepad.exe", NULL, NULL, NULL,
+                        FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi ))
+    {
+        memset( &info, 0xcc, sizeof(info) );
+        status = pNtQueryInformationThread( pi.hThread, ThreadBasicInformation, &info, sizeof(info), NULL );
+        ok( !status, "ThreadBasicInformation failed %x\n", status );
+        if (!is_wow64)
+        {
+            if (!ReadProcessMemory( pi.hProcess, info.TebBaseAddress, &teb, sizeof(teb), &res )) res = 0;
+            ok( res == sizeof(teb), "wrong len %lx\n", res );
+            ok( teb.Tib.Self == info.TebBaseAddress, "wrong teb %p / %p\n",
+                teb.Tib.Self, info.TebBaseAddress );
+            ok( !teb.GdiBatchCount, "GdiBatchCount set\n" );
+            ok( !teb.WowTebOffset || broken( teb.WowTebOffset == 1 ),  /* vista */
+                "wrong teb offset %d\n", teb.WowTebOffset );
+        }
+        else ok( !info.TebBaseAddress, "got teb %p\n", info.TebBaseAddress );
+
+        status = pNtQueryInformationProcess( pi.hProcess, ProcessBasicInformation,
+                                             &proc_info, sizeof(proc_info), NULL );
+        ok( !status, "ProcessBasicInformation failed %x\n", status );
+        if (is_wow64)
+            ok( !proc_info.PebBaseAddress ||
+                broken( (char *)proc_info.PebBaseAddress >= (char *)0x7f000000 ), /* vista */
+                "wrong peb %p\n", proc_info.PebBaseAddress );
+        else
+            ok( proc_info.PebBaseAddress == teb.Peb, "wrong peb %p / %p\n",
+                proc_info.PebBaseAddress, teb.Peb );
+
+        TerminateProcess( pi.hProcess, 0 );
+        CloseHandle( pi.hProcess );
+        CloseHandle( pi.hThread );
+    }
+
+    Wow64RevertWow64FsRedirection( redir );
+
+#ifdef _WIN64
+    if (pRtlWow64GetCpuAreaInfo)
+    {
+        static const struct
+        {
+            USHORT machine;
+            NTSTATUS expect;
+            ULONG align, size, offset, flag;
+        } tests[] =
+        {
+            { IMAGE_FILE_MACHINE_I386,  0,  4, 0x2cc, 0x00, 0x00010000 },
+            { IMAGE_FILE_MACHINE_AMD64, 0, 16, 0x4d0, 0x30, 0x00100000 },
+            { IMAGE_FILE_MACHINE_ARMNT, 0,  8, 0x1a0, 0x00, 0x00200000 },
+            { IMAGE_FILE_MACHINE_ARM64, 0, 16, 0x390, 0x00, 0x00400000 },
+            { IMAGE_FILE_MACHINE_ARM,   STATUS_INVALID_PARAMETER },
+            { IMAGE_FILE_MACHINE_THUMB, STATUS_INVALID_PARAMETER },
+        };
+        USHORT buffer[2048];
+        WOW64_CPURESERVED *cpu;
+        WOW64_CPU_AREA_INFO info;
+        ULONG i, j;
+        NTSTATUS status;
+#define ALIGN(ptr,align) ((void *)(((ULONG_PTR)(ptr) + (align) - 1) & ~((align) - 1)))
+
+        for (i = 0; i < ARRAY_SIZE(tests); i++)
+        {
+            for (j = 0; j < 8; j++)
+            {
+                cpu = (WOW64_CPURESERVED *)(buffer + j);
+                cpu->Flags = 0;
+                cpu->Machine = tests[i].machine;
+                status = pRtlWow64GetCpuAreaInfo( cpu, 0, &info );
+                ok( status == tests[i].expect, "%u:%u: failed %x\n", i, j, status );
+                if (status) continue;
+                ok( info.Context == ALIGN( cpu + 1, tests[i].align ), "%u:%u: wrong offset %u\n",
+                    i, j, (ULONG)((char *)info.Context - (char *)cpu) );
+                ok( info.ContextEx == ALIGN( (char *)info.Context + tests[i].size, sizeof(void*) ),
+                    "%u:%u: wrong ex offset %u\n", i, j, (ULONG)((char *)info.ContextEx - (char *)cpu) );
+                ok( info.ContextFlagsLocation == (char *)info.Context + tests[i].offset,
+                    "%u:%u: wrong flags offset %u\n",
+                    i, j, (ULONG)((char *)info.ContextFlagsLocation - (char *)info.Context) );
+                ok( info.CpuReserved == cpu, "%u:%u: wrong cpu %p / %p\n", info.CpuReserved, cpu );
+                ok( info.ContextFlag == tests[i].flag, "%u:%u: wrong flag %08x\n", i, j, info.ContextFlag );
+                ok( info.Machine == tests[i].machine, "%u:%u: wrong machine %x\n", i, j, info.Machine );
+            }
+        }
+#undef ALIGN
+    }
+    else win_skip( "RtlWow64GetCpuAreaInfo not supported\n" );
+#else
     if (is_wow64)
     {
         PEB64 *peb64;
@@ -2808,6 +3341,10 @@ static void test_wow64(void)
             "wrong WowTebOffset %x (%p/%p)\n", NtCurrentTeb()->WowTebOffset, teb64, NtCurrentTeb() );
         ok( (char *)teb64 + 0x2000 == (char *)NtCurrentTeb(), "unexpected diff %p / %p\n",
             teb64, NtCurrentTeb() );
+        ok( (char *)teb64 + teb64->WowTebOffset == (char *)NtCurrentTeb() ||
+            broken( !teb64->WowTebOffset || teb64->WowTebOffset == 1 ),  /* pre-win10 */
+            "wrong WowTebOffset %x (%p/%p)\n", teb64->WowTebOffset, teb64, NtCurrentTeb() );
+        ok( !teb64->GdiBatchCount, "GdiBatchCount set %x\n", teb64->GdiBatchCount );
         ok( teb64->Tib.ExceptionList == PtrToUlong( NtCurrentTeb() ), "wrong Tib.ExceptionList %s / %p\n",
             wine_dbgstr_longlong(teb64->Tib.ExceptionList), NtCurrentTeb() );
         ok( teb64->Tib.Self == PtrToUlong( teb64 ), "wrong Tib.Self %s / %p\n",
@@ -2944,8 +3481,7 @@ START_TEST(info)
     char **argv;
     int argc;
 
-    if(!InitFunctionPtrs())
-        return;
+    InitFunctionPtrs();
 
     argc = winetest_get_mainargs(&argv);
     if (argc >= 3) return; /* Child */
@@ -2959,6 +3495,7 @@ START_TEST(info)
     test_query_procperf();
     test_query_module();
     test_query_handle();
+    test_query_handle_ex();
     test_query_cache();
     test_query_interrupt();
     test_time_adjustment();
@@ -2966,8 +3503,10 @@ START_TEST(info)
     test_query_regquota();
     test_query_logicalproc();
     test_query_logicalprocex();
+    test_query_cpusetinfo();
     test_query_firmware();
     test_query_data_alignment();
+    test_query_architectures();
 
     /* NtPowerInformation */
     test_query_battery();

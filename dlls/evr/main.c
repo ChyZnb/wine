@@ -32,20 +32,17 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(evr);
 
-static HINSTANCE instance_evr;
-
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
-    if (reason == DLL_WINE_PREATTACH)
-        return FALSE; /* prefer native version */
-    else if (reason == DLL_PROCESS_ATTACH)
+    switch (reason)
     {
-        instance_evr = instance;
+    case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(instance);
-    }
-    else if (reason == DLL_PROCESS_DETACH && !reserved)
-    {
+        break;
+    case DLL_PROCESS_DETACH:
+        if (reserved) break;
         strmbase_release_typelibs();
+        break;
     }
     return TRUE;
 }
@@ -180,21 +177,6 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv)
 
     *ppv = &(factory->IClassFactory_iface);
     return S_OK;
-}
-
-HRESULT WINAPI DllCanUnloadNow(void)
-{
-    return S_FALSE;
-}
-
-HRESULT WINAPI DllRegisterServer(void)
-{
-    return __wine_register_resources(instance_evr);
-}
-
-HRESULT WINAPI DllUnregisterServer(void)
-{
-    return __wine_unregister_resources(instance_evr);
 }
 
 HRESULT WINAPI MFCreateVideoMixerAndPresenter(IUnknown *mixer_outer, IUnknown *presenter_outer,
