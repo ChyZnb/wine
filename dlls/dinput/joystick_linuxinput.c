@@ -371,55 +371,7 @@ static void fill_joystick_dideviceinstanceW(LPDIDEVICEINSTANCEW lpddi, DWORD ver
     MultiByteToWideChar(CP_ACP, 0, joydevs[id].name, -1, lpddi->tszProductName, MAX_PATH);
 }
 
-static void fill_joystick_dideviceinstanceA(LPDIDEVICEINSTANCEA lpddi, DWORD version, int id)
-{
-    DIDEVICEINSTANCEW lpddiW;
-    DWORD dwSize = lpddi->dwSize;
-
-    lpddiW.dwSize = sizeof(lpddiW);
-    fill_joystick_dideviceinstanceW(&lpddiW, version, id);
-
-    TRACE("%d %p\n", dwSize, lpddi);
-    memset(lpddi, 0, dwSize);
-
-    /* Convert W->A */
-    lpddi->dwSize = dwSize;
-    lpddi->guidInstance = lpddiW.guidInstance;
-    lpddi->guidProduct = lpddiW.guidProduct;
-    lpddi->dwDevType = lpddiW.dwDevType;
-    lstrcpynA(lpddi->tszInstanceName, joydevs[id].name, MAX_PATH);
-    lstrcpynA(lpddi->tszProductName,  joydevs[id].name, MAX_PATH);
-    lpddi->guidFFDriver = lpddiW.guidFFDriver;
-    lpddi->wUsagePage = lpddiW.wUsagePage;
-    lpddi->wUsage = lpddiW.wUsage;
-}
-
-static HRESULT joydev_enum_deviceA(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEA lpddi, DWORD version, int id)
-{
-  find_joydevs();
-
-  if (id >= have_joydevs) {
-    return E_FAIL;
-  }
-
-  if (!((dwDevType == 0) ||
-        ((dwDevType == DIDEVTYPE_JOYSTICK) && (version >= 0x0300 && version < 0x0800)) ||
-        (((dwDevType == DI8DEVCLASS_GAMECTRL) || (dwDevType == DI8DEVTYPE_JOYSTICK)) && (version >= 0x0800))))
-    return S_FALSE;
-
-#ifndef HAVE_STRUCT_FF_EFFECT_DIRECTION
-  if (dwFlags & DIEDFL_FORCEFEEDBACK)
-    return S_FALSE;
-#endif
-
-  if (!(dwFlags & DIEDFL_FORCEFEEDBACK) || joydevs[id].has_ff) {
-    fill_joystick_dideviceinstanceA(lpddi, version, id);
-    return S_OK;
-  }
-  return S_FALSE;
-}
-
-static HRESULT joydev_enum_deviceW(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEW lpddi, DWORD version, int id)
+static HRESULT joydev_enum_device(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEW lpddi, DWORD version, int id)
 {
   find_joydevs();
 
@@ -612,13 +564,13 @@ static unsigned short get_joystick_index(REFGUID guid)
     return MAX_JOYDEV;
 }
 
-static HRESULT joydev_create_device(IDirectInputImpl *dinput, REFGUID rguid, REFIID riid, LPVOID *pdev, int unicode)
+static HRESULT joydev_create_device( IDirectInputImpl *dinput, REFGUID rguid, IDirectInputDevice8W **out )
 {
     unsigned short index;
 
-    TRACE("%p %s %s %p %i\n", dinput, debugstr_guid(rguid), debugstr_guid(riid), pdev, unicode);
+    TRACE( "%p %s %p\n", dinput, debugstr_guid( rguid ), out );
     find_joydevs();
-    *pdev = NULL;
+    *out = NULL;
 
     if ((index = get_joystick_index(rguid)) < MAX_JOYDEV &&
         have_joydevs && index < have_joydevs)
@@ -626,37 +578,11 @@ static HRESULT joydev_create_device(IDirectInputImpl *dinput, REFGUID rguid, REF
         JoystickImpl *This;
         HRESULT hr;
 
-        if (riid == NULL)
-            ;/* nothing */
-        else if (IsEqualGUID(&IID_IDirectInputDeviceA,  riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice2A, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice7A, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice8A, riid))
-        {
-            unicode = 0;
-        }
-        else if (IsEqualGUID(&IID_IDirectInputDeviceW,  riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice2W, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice7W, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice8W, riid))
-        {
-            unicode = 1;
-        }
-        else
-        {
-            WARN("no interface\n");
-            return DIERR_NOINTERFACE;
-        }
-
         if (FAILED(hr = alloc_device( rguid, dinput, &This, index ))) return hr;
 
         TRACE( "Created a Joystick device (%p)\n", This );
 
-        if (unicode)
-            *pdev = &This->generic.base.IDirectInputDevice8W_iface;
-        else
-            *pdev = &This->generic.base.IDirectInputDevice8A_iface;
-
+        *out = &This->generic.base.IDirectInputDevice8W_iface;
         return DI_OK;
     }
 
@@ -666,8 +592,7 @@ static HRESULT joydev_create_device(IDirectInputImpl *dinput, REFGUID rguid, REF
 
 const struct dinput_device joystick_linuxinput_device = {
   "Wine Linux-input joystick driver",
-  joydev_enum_deviceA,
-  joydev_enum_deviceW,
+  joydev_enum_device,
   joydev_create_device
 };
 
@@ -1306,7 +1231,7 @@ static const IDirectInputDevice8WVtbl JoystickWvt =
 {
     IDirectInputDevice2WImpl_QueryInterface,
     IDirectInputDevice2WImpl_AddRef,
-    IDirectInputDevice2WImpl_Release,
+    JoystickWGenericImpl_Release,
     JoystickWGenericImpl_GetCapabilities,
     IDirectInputDevice2WImpl_EnumObjects,
     JoystickWImpl_GetProperty,
@@ -1344,7 +1269,6 @@ const struct dinput_device joystick_linuxinput_device = {
   "Wine Linux-input joystick driver",
   NULL,
   NULL,
-  NULL
 };
 
 #endif  /* HAS_PROPER_HEADER */

@@ -382,11 +382,11 @@ static HRESULT WINAPI IDirectInputWImpl_EnumDevices(
         return DIERR_NOTINITIALIZED;
 
     for (i = 0; i < ARRAY_SIZE(dinput_devices); i++) {
-        if (!dinput_devices[i]->enum_deviceW) continue;
+        if (!dinput_devices[i]->enum_device) continue;
         for (j = 0, r = S_OK; SUCCEEDED(r); j++) {
             devInstance.dwSize = sizeof(devInstance);
             TRACE("  - checking device %u ('%s')\n", i, dinput_devices[i]->name);
-            r = dinput_devices[i]->enum_deviceW(dwDevType, dwFlags, &devInstance, This->dwVersion, j);
+            r = dinput_devices[i]->enum_device(dwDevType, dwFlags, &devInstance, This->dwVersion, j);
             if (r == S_OK)
                 if (enum_callback_wrapper(lpCallback, &devInstance, pvRef) == DIENUM_STOP)
                     return S_OK;
@@ -644,9 +644,15 @@ static HRESULT WINAPI IDirectInput2WImpl_FindDevice(LPDIRECTINPUT7W iface, REFGU
     return DI_OK;
 }
 
-static HRESULT create_device(IDirectInputImpl *This, REFGUID rguid, REFIID riid, LPVOID *pvOut, BOOL unicode)
+static HRESULT WINAPI IDirectInput7WImpl_CreateDeviceEx( IDirectInput7W *iface, REFGUID rguid, REFIID riid,
+                                                         LPVOID *pvOut, LPUNKNOWN lpUnknownOuter )
 {
+    IDirectInputDevice8W *device;
+    IDirectInputImpl *This = impl_from_IDirectInput7W( iface );
     unsigned int i;
+    HRESULT hr;
+
+    TRACE( "(%p)->(%s, %s, %p, %p)\n", This, debugstr_guid( rguid ), debugstr_guid( riid ), pvOut, lpUnknownOuter );
 
     if (pvOut)
         *pvOut = NULL;
@@ -660,31 +666,23 @@ static HRESULT create_device(IDirectInputImpl *This, REFGUID rguid, REFIID riid,
     /* Loop on all the devices to see if anyone matches the given GUID */
     for (i = 0; i < ARRAY_SIZE(dinput_devices); i++)
     {
-        HRESULT ret;
-
         if (!dinput_devices[i]->create_device) continue;
-        if ((ret = dinput_devices[i]->create_device(This, rguid, riid, pvOut, unicode)) == DI_OK)
-            return DI_OK;
+        if (SUCCEEDED(hr = dinput_devices[i]->create_device( This, rguid, &device )))
+        {
+            hr = IDirectInputDevice8_QueryInterface( device, riid, pvOut );
+            IDirectInputDevice8_Release( device );
+            return hr;
+        }
     }
 
     WARN("invalid device GUID %s\n", debugstr_guid(rguid));
     return DIERR_DEVICENOTREG;
 }
 
-static HRESULT WINAPI IDirectInput7WImpl_CreateDeviceEx(LPDIRECTINPUT7W iface, REFGUID rguid,
-                                                        REFIID riid, LPVOID* pvOut, LPUNKNOWN lpUnknownOuter)
-{
-    IDirectInputImpl *This = impl_from_IDirectInput7W( iface );
-
-    TRACE("(%p)->(%s, %s, %p, %p)\n", This, debugstr_guid(rguid), debugstr_guid(riid), pvOut, lpUnknownOuter);
-
-    return create_device(This, rguid, riid, pvOut, TRUE);
-}
-
 static HRESULT WINAPI IDirectInputWImpl_CreateDevice(LPDIRECTINPUT7W iface, REFGUID rguid,
                                                      LPDIRECTINPUTDEVICEW* pdev, LPUNKNOWN punk)
 {
-    return IDirectInput7_CreateDeviceEx( iface, rguid, NULL, (LPVOID *)pdev, punk );
+    return IDirectInput7_CreateDeviceEx( iface, rguid, &IID_IDirectInputDeviceW, (LPVOID *)pdev, punk );
 }
 
 /*******************************************************************************
@@ -713,7 +711,7 @@ static HRESULT WINAPI IDirectInput8WImpl_CreateDevice(LPDIRECTINPUT8W iface, REF
                                                       LPDIRECTINPUTDEVICE8W* pdev, LPUNKNOWN punk)
 {
     IDirectInputImpl *This = impl_from_IDirectInput8W( iface );
-    return IDirectInput7_CreateDeviceEx( &This->IDirectInput7W_iface, rguid, NULL, (LPVOID *)pdev, punk );
+    return IDirectInput7_CreateDeviceEx( &This->IDirectInput7W_iface, rguid, &IID_IDirectInputDevice8W, (LPVOID *)pdev, punk );
 }
 
 static HRESULT WINAPI IDirectInput8WImpl_EnumDevices(LPDIRECTINPUT8W iface, DWORD dwDevType, LPDIENUMDEVICESCALLBACKW lpCallback,
@@ -827,14 +825,14 @@ static HRESULT WINAPI IDirectInput8WImpl_EnumDevicesBySemantics(
     {
         HRESULT enumSuccess;
 
-        if (!dinput_devices[i]->enum_deviceW) continue;
+        if (!dinput_devices[i]->enum_device) continue;
 
         for (j = 0, enumSuccess = S_OK; SUCCEEDED(enumSuccess); j++)
         {
             TRACE(" - checking device %u ('%s')\n", i, dinput_devices[i]->name);
 
             /* Default behavior is to enumerate attached game controllers */
-            enumSuccess = dinput_devices[i]->enum_deviceW(DI8DEVCLASS_GAMECTRL, DIEDFL_ATTACHEDONLY | dwFlags, &didevi, This->dwVersion, j);
+            enumSuccess = dinput_devices[i]->enum_device(DI8DEVCLASS_GAMECTRL, DIEDFL_ATTACHEDONLY | dwFlags, &didevi, This->dwVersion, j);
             if (enumSuccess == S_OK &&
                 should_enumerate_device(ptszUserName, dwFlags, &This->device_players, &didevi.guidInstance))
             {
@@ -866,8 +864,10 @@ static HRESULT WINAPI IDirectInput8WImpl_EnumDevicesBySemantics(
         if (lpCallback(&didevis[i], lpdid, callbackFlags, --remain, pvRef) == DIENUM_STOP)
         {
             HeapFree(GetProcessHeap(), 0, didevis);
+            IDirectInputDevice_Release(lpdid);
             return DI_OK;
         }
+        IDirectInputDevice_Release(lpdid);
     }
 
     HeapFree(GetProcessHeap(), 0, didevis);
@@ -885,7 +885,11 @@ static HRESULT WINAPI IDirectInput8WImpl_EnumDevicesBySemantics(
             IDirectInputDevice_GetDeviceInfo(lpdid, &didevi);
 
             if (lpCallback(&didevi, lpdid, callbackFlags, --remain, pvRef) == DIENUM_STOP)
+            {
+                IDirectInputDevice_Release(lpdid);
                 return DI_OK;
+            }
+            IDirectInputDevice_Release(lpdid);
         }
     }
 
@@ -1000,13 +1004,13 @@ static HRESULT WINAPI JoyConfig8Impl_GetConfig(IDirectInputJoyConfig8 *iface, UI
     /* Enumerate all joysticks in order */
     for (i = 0; i < ARRAY_SIZE(dinput_devices); i++)
     {
-        if (!dinput_devices[i]->enum_deviceA) continue;
+        if (!dinput_devices[i]->enum_device) continue;
 
         for (j = 0, r = S_OK; SUCCEEDED(r); j++)
         {
-            DIDEVICEINSTANCEA dev;
+            DIDEVICEINSTANCEW dev;
             dev.dwSize = sizeof(dev);
-            if ((r = dinput_devices[i]->enum_deviceA(DI8DEVCLASS_GAMECTRL, 0, &dev, di->dwVersion, j)) == S_OK)
+            if ((r = dinput_devices[i]->enum_device(DI8DEVCLASS_GAMECTRL, 0, &dev, di->dwVersion, j)) == S_OK)
             {
                 /* Only take into account the chosen id */
                 if (found == id)

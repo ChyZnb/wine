@@ -24,12 +24,25 @@
 
 #include "config.h"
 #include <errno.h>
+#include <sys/types.h>
 #include <unistd.h>
+#ifdef HAVE_IFADDRS_H
+# include <ifaddrs.h>
+#endif
+#ifdef HAVE_NET_IF_H
+# include <net/if.h>
+#endif
+#ifdef HAVE_SYS_IOCTL_H
+# include <sys/ioctl.h>
+#endif
 #ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
 #ifdef HAVE_NETINET_IN_H
 #include <netinet/in.h>
+#endif
+#ifdef HAVE_NETINET_TCP_H
+# include <netinet/tcp.h>
 #endif
 
 #ifdef HAVE_NETIPX_IPX_H
@@ -62,12 +75,18 @@
 #define USE_WS_PREFIX
 #include "winsock2.h"
 #include "mswsock.h"
+#include "mstcpip.h"
 #include "ws2tcpip.h"
 #include "wsipx.h"
 #include "af_irda.h"
 #include "wine/afd.h"
 
 #include "unix_private.h"
+
+#if !defined(TCP_KEEPIDLE) && defined(TCP_KEEPALIVE)
+/* TCP_KEEPALIVE is the Mac OS name for TCP_KEEPIDLE */
+#define TCP_KEEPIDLE TCP_KEEPALIVE
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(winsock);
 
@@ -255,10 +274,10 @@ static socklen_t sockaddr_to_unix( const struct WS_sockaddr *wsaddr, int wsaddrl
         memcpy( &win, wsaddr, sizeof(win) );
         uaddr->irda.sir_family = AF_IRDA;
         if (sscanf( win.irdaServiceName, "LSAP-SEL%u", &lsap_sel ) == 1)
-            uaddr->sir_lsap_sel = lsap_sel;
+            uaddr->irda.sir_lsap_sel = lsap_sel;
         else
         {
-            uaddr->sir_lsap_sel = LSAP_ANY;
+            uaddr->irda.sir_lsap_sel = LSAP_ANY;
             memcpy( uaddr->irda.sir_name, win.irdaServiceName, sizeof(win.irdaServiceName) );
         }
         memcpy( &uaddr->irda.sir_addr, win.irdaDeviceID, sizeof(win.irdaDeviceID) );
@@ -1116,6 +1135,17 @@ static NTSTATUS sock_transmit( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc,
     return status;
 }
 
+static void complete_async( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
+                            IO_STATUS_BLOCK *io, NTSTATUS status, ULONG_PTR information )
+{
+    io->Status = status;
+    io->Information = information;
+    if (event) NtSetEvent( event, NULL );
+    if (apc) NtQueueApcThread( GetCurrentThread(), (PNTAPCFUNC)apc, (ULONG_PTR)apc_user, (ULONG_PTR)io, 0 );
+    if (apc_user) add_completion( handle, (ULONG_PTR)apc_user, status, information, FALSE );
+}
+
+
 NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
                      ULONG code, void *in_buffer, ULONG in_size, void *out_buffer, ULONG out_size )
 {
@@ -1127,6 +1157,22 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
 
     switch (code)
     {
+        case IOCTL_AFD_BIND:
+        {
+            const struct afd_bind_params *params = in_buffer;
+
+            if (params->unknown) FIXME( "bind: got unknown %#x\n", params->unknown );
+
+            status = STATUS_BAD_DEVICE_TYPE;
+            break;
+        }
+
+        case IOCTL_AFD_GETSOCKNAME:
+            if (in_size) FIXME( "unexpected input size %u\n", in_size );
+
+            status = STATUS_BAD_DEVICE_TYPE;
+            break;
+
         case IOCTL_AFD_LISTEN:
         {
             const struct afd_listen_params *params = in_buffer;
@@ -1139,6 +1185,23 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
             status = STATUS_BAD_DEVICE_TYPE;
             break;
         }
+
+        case IOCTL_AFD_EVENT_SELECT:
+        {
+            const struct afd_event_select_params *params = in_buffer;
+
+            TRACE( "event %p, mask %#x\n", params->event, params->mask );
+            if (out_size) FIXME( "unexpected output size %u\n", out_size );
+
+            status = STATUS_BAD_DEVICE_TYPE;
+            break;
+        }
+
+        case IOCTL_AFD_GET_EVENTS:
+            if (in_size) FIXME( "unexpected input size %u\n", in_size );
+
+            status = STATUS_BAD_DEVICE_TYPE;
+            break;
 
         case IOCTL_AFD_RECV:
         {
@@ -1241,7 +1304,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
 
             if (in_size < sizeof(*params))
             {
-                return STATUS_BUFFER_TOO_SMALL;
+                status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
 
@@ -1249,9 +1312,233 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
             break;
         }
 
+        case IOCTL_AFD_WINE_COMPLETE_ASYNC:
+        {
+            if (in_size != sizeof(NTSTATUS))
+                return STATUS_BUFFER_TOO_SMALL;
+
+            status = *(NTSTATUS *)in_buffer;
+            complete_async( handle, event, apc, apc_user, io, status, 0 );
+            break;
+        }
+
         case IOCTL_AFD_POLL:
             status = sock_poll( handle, event, apc, apc_user, io, in_buffer, in_size, out_buffer, out_size );
             break;
+
+        case IOCTL_AFD_WINE_FIONREAD:
+        {
+            int value, ret;
+
+            if (out_size < sizeof(int))
+            {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+
+            if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL )))
+                return status;
+
+#ifdef linux
+            {
+                socklen_t len = sizeof(value);
+
+                /* FIONREAD on a listening socket always fails (see tcp(7)). */
+                if (!getsockopt( fd, SOL_SOCKET, SO_ACCEPTCONN, &value, &len ) && value)
+                {
+                    *(int *)out_buffer = 0;
+                    status = STATUS_SUCCESS;
+                    complete_async( handle, event, apc, apc_user, io, status, 0 );
+                    break;
+                }
+            }
+#endif
+
+            if ((ret = ioctl( fd, FIONREAD, &value )) < 0)
+            {
+                status = sock_errno_to_status( errno );
+                break;
+            }
+            *(int *)out_buffer = value;
+            status = STATUS_SUCCESS;
+            complete_async( handle, event, apc, apc_user, io, status, 0 );
+            break;
+        }
+
+        case IOCTL_AFD_WINE_SIOCATMARK:
+        {
+            int value, ret;
+            socklen_t len = sizeof(value);
+
+            if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL )))
+                return status;
+
+            if (out_size < sizeof(int))
+            {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+
+            if (getsockopt( fd, SOL_SOCKET, SO_OOBINLINE, &value, &len ) < 0)
+            {
+                status = sock_errno_to_status( errno );
+                break;
+            }
+
+            if (value)
+            {
+                *(int *)out_buffer = TRUE;
+            }
+            else
+            {
+                if ((ret = ioctl( fd, SIOCATMARK, &value )) < 0)
+                {
+                    status = sock_errno_to_status( errno );
+                    break;
+                }
+                /* windows is reversed with respect to unix */
+                *(int *)out_buffer = !value;
+            }
+            status = STATUS_SUCCESS;
+            complete_async( handle, event, apc, apc_user, io, status, 0 );
+            break;
+        }
+
+        case IOCTL_AFD_WINE_GET_INTERFACE_LIST:
+        {
+#ifdef HAVE_GETIFADDRS
+            INTERFACE_INFO *info = out_buffer;
+            struct ifaddrs *ifaddrs, *ifaddr;
+            unsigned int count = 0;
+            ULONG ret_size;
+
+            if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL )))
+                return status;
+
+            if (getifaddrs( &ifaddrs ) < 0)
+            {
+                status = sock_errno_to_status( errno );
+                break;
+            }
+
+            for (ifaddr = ifaddrs; ifaddr != NULL; ifaddr = ifaddr->ifa_next)
+            {
+                if (ifaddr->ifa_addr && ifaddr->ifa_addr->sa_family == AF_INET) ++count;
+            }
+
+            ret_size = count * sizeof(*info);
+            if (out_size < ret_size)
+            {
+                status = STATUS_PENDING;
+                complete_async( handle, event, apc, apc_user, io, STATUS_BUFFER_TOO_SMALL, 0 );
+                freeifaddrs( ifaddrs );
+                break;
+            }
+
+            memset( out_buffer, 0, ret_size );
+
+            count = 0;
+            for (ifaddr = ifaddrs; ifaddr != NULL; ifaddr = ifaddr->ifa_next)
+            {
+                in_addr_t addr, mask;
+
+                if (!ifaddr->ifa_addr || ifaddr->ifa_addr->sa_family != AF_INET)
+                    continue;
+
+                addr = ((const struct sockaddr_in *)ifaddr->ifa_addr)->sin_addr.s_addr;
+                mask = ((const struct sockaddr_in *)ifaddr->ifa_netmask)->sin_addr.s_addr;
+
+                info[count].iiFlags = 0;
+                if (ifaddr->ifa_flags & IFF_BROADCAST)
+                    info[count].iiFlags |= WS_IFF_BROADCAST;
+                if (ifaddr->ifa_flags & IFF_LOOPBACK)
+                    info[count].iiFlags |= WS_IFF_LOOPBACK;
+                if (ifaddr->ifa_flags & IFF_MULTICAST)
+                    info[count].iiFlags |= WS_IFF_MULTICAST;
+#ifdef IFF_POINTTOPOINT
+                if (ifaddr->ifa_flags & IFF_POINTTOPOINT)
+                    info[count].iiFlags |= WS_IFF_POINTTOPOINT;
+#endif
+                if (ifaddr->ifa_flags & IFF_UP)
+                    info[count].iiFlags |= WS_IFF_UP;
+
+                info[count].iiAddress.AddressIn.sin_family = WS_AF_INET;
+                info[count].iiAddress.AddressIn.sin_port = 0;
+                info[count].iiAddress.AddressIn.sin_addr.WS_s_addr = addr;
+
+                info[count].iiNetmask.AddressIn.sin_family = WS_AF_INET;
+                info[count].iiNetmask.AddressIn.sin_port = 0;
+                info[count].iiNetmask.AddressIn.sin_addr.WS_s_addr = mask;
+
+                if (ifaddr->ifa_flags & IFF_BROADCAST)
+                {
+                    info[count].iiBroadcastAddress.AddressIn.sin_family = WS_AF_INET;
+                    info[count].iiBroadcastAddress.AddressIn.sin_port = 0;
+                    info[count].iiBroadcastAddress.AddressIn.sin_addr.WS_s_addr = addr | ~mask;
+                }
+
+                ++count;
+            }
+
+            freeifaddrs( ifaddrs );
+            status = STATUS_PENDING;
+            complete_async( handle, event, apc, apc_user, io, STATUS_SUCCESS, ret_size );
+#else
+            FIXME( "Interface list queries are currently not supported on this platform.\n" );
+            status = STATUS_NOT_SUPPORTED;
+#endif
+            break;
+        }
+
+        case IOCTL_AFD_WINE_KEEPALIVE_VALS:
+        {
+            struct tcp_keepalive *k = in_buffer;
+            int keepalive;
+
+            if (!in_buffer || in_size < sizeof(struct tcp_keepalive))
+                return STATUS_BUFFER_TOO_SMALL;
+            keepalive = !!k->onoff;
+
+            if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL )))
+                return status;
+
+            if (setsockopt( fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int) ) < 0)
+            {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            if (keepalive)
+            {
+#ifdef TCP_KEEPIDLE
+                int idle = max( 1, (k->keepalivetime + 500) / 1000 );
+
+                if (setsockopt( fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(int) ) < 0)
+                {
+                    status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+#else
+                FIXME("ignoring keepalive timeout\n");
+#endif
+            }
+
+            if (keepalive)
+            {
+#ifdef TCP_KEEPINTVL
+                int interval = max( 1, (k->keepaliveinterval + 500) / 1000 );
+
+                if (setsockopt( fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(int) ) < 0)
+                    status = STATUS_INVALID_PARAMETER;
+#else
+                FIXME("ignoring keepalive interval\n");
+#endif
+            }
+
+            status = STATUS_SUCCESS;
+            complete_async( handle, event, apc, apc_user, io, status, 0 );
+            break;
+        }
 
         default:
         {

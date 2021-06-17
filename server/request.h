@@ -172,10 +172,8 @@ DECL_HANDLER(get_file_info);
 DECL_HANDLER(get_volume_info);
 DECL_HANDLER(lock_file);
 DECL_HANDLER(unlock_file);
-DECL_HANDLER(set_socket_event);
 DECL_HANDLER(get_socket_event);
 DECL_HANDLER(get_socket_info);
-DECL_HANDLER(enable_socket_event);
 DECL_HANDLER(set_socket_deferred);
 DECL_HANDLER(recv_socket);
 DECL_HANDLER(poll_socket);
@@ -455,10 +453,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_volume_info,
     (req_handler)req_lock_file,
     (req_handler)req_unlock_file,
-    (req_handler)req_set_socket_event,
     (req_handler)req_get_socket_event,
     (req_handler)req_get_socket_info,
-    (req_handler)req_enable_socket_event,
     (req_handler)req_set_socket_deferred,
     (req_handler)req_recv_socket,
     (req_handler)req_poll_socket,
@@ -693,7 +689,7 @@ C_ASSERT( sizeof(client_ptr_t) == 8 );
 C_ASSERT( sizeof(data_size_t) == 4 );
 C_ASSERT( sizeof(file_pos_t) == 8 );
 C_ASSERT( sizeof(generic_map_t) == 16 );
-C_ASSERT( sizeof(hw_input_t) == 32 );
+C_ASSERT( sizeof(hw_input_t) == 40 );
 C_ASSERT( sizeof(int) == 4 );
 C_ASSERT( sizeof(ioctl_code_t) == 4 );
 C_ASSERT( sizeof(irp_params_t) == 32 );
@@ -1042,31 +1038,19 @@ C_ASSERT( FIELD_OFFSET(struct unlock_file_request, handle) == 12 );
 C_ASSERT( FIELD_OFFSET(struct unlock_file_request, offset) == 16 );
 C_ASSERT( FIELD_OFFSET(struct unlock_file_request, count) == 24 );
 C_ASSERT( sizeof(struct unlock_file_request) == 32 );
-C_ASSERT( FIELD_OFFSET(struct set_socket_event_request, handle) == 12 );
-C_ASSERT( FIELD_OFFSET(struct set_socket_event_request, mask) == 16 );
-C_ASSERT( FIELD_OFFSET(struct set_socket_event_request, event) == 20 );
-C_ASSERT( FIELD_OFFSET(struct set_socket_event_request, window) == 24 );
-C_ASSERT( FIELD_OFFSET(struct set_socket_event_request, msg) == 28 );
-C_ASSERT( sizeof(struct set_socket_event_request) == 32 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_event_request, handle) == 12 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_event_request, service) == 16 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_event_request, c_event) == 20 );
 C_ASSERT( sizeof(struct get_socket_event_request) == 24 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_event_reply, mask) == 8 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_event_reply, pmask) == 12 );
-C_ASSERT( FIELD_OFFSET(struct get_socket_event_reply, state) == 16 );
-C_ASSERT( sizeof(struct get_socket_event_reply) == 24 );
+C_ASSERT( sizeof(struct get_socket_event_reply) == 16 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_info_request, handle) == 12 );
 C_ASSERT( sizeof(struct get_socket_info_request) == 16 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_info_reply, family) == 8 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_info_reply, type) == 12 );
 C_ASSERT( FIELD_OFFSET(struct get_socket_info_reply, protocol) == 16 );
 C_ASSERT( sizeof(struct get_socket_info_reply) == 24 );
-C_ASSERT( FIELD_OFFSET(struct enable_socket_event_request, handle) == 12 );
-C_ASSERT( FIELD_OFFSET(struct enable_socket_event_request, mask) == 16 );
-C_ASSERT( FIELD_OFFSET(struct enable_socket_event_request, sstate) == 20 );
-C_ASSERT( FIELD_OFFSET(struct enable_socket_event_request, cstate) == 24 );
-C_ASSERT( sizeof(struct enable_socket_event_request) == 32 );
 C_ASSERT( FIELD_OFFSET(struct set_socket_deferred_request, handle) == 12 );
 C_ASSERT( FIELD_OFFSET(struct set_socket_deferred_request, deferred) == 16 );
 C_ASSERT( sizeof(struct set_socket_deferred_request) == 24 );
@@ -1355,8 +1339,8 @@ C_ASSERT( FIELD_OFFSET(struct post_quit_message_request, exit_code) == 12 );
 C_ASSERT( sizeof(struct post_quit_message_request) == 16 );
 C_ASSERT( FIELD_OFFSET(struct send_hardware_message_request, win) == 12 );
 C_ASSERT( FIELD_OFFSET(struct send_hardware_message_request, input) == 16 );
-C_ASSERT( FIELD_OFFSET(struct send_hardware_message_request, flags) == 48 );
-C_ASSERT( sizeof(struct send_hardware_message_request) == 56 );
+C_ASSERT( FIELD_OFFSET(struct send_hardware_message_request, flags) == 56 );
+C_ASSERT( sizeof(struct send_hardware_message_request) == 64 );
 C_ASSERT( FIELD_OFFSET(struct send_hardware_message_reply, wait) == 8 );
 C_ASSERT( FIELD_OFFSET(struct send_hardware_message_reply, prev_x) == 12 );
 C_ASSERT( FIELD_OFFSET(struct send_hardware_message_reply, prev_y) == 16 );

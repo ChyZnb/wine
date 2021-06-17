@@ -984,53 +984,7 @@ static DWORD make_vid_pid(IOHIDDeviceRef device)
     return MAKELONG(vendID, prodID);
 }
 
-static HRESULT joydev_enum_deviceA(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEA lpddi, DWORD version, int id)
-{
-    IOHIDDeviceRef device;
-    BOOL is_joystick;
-
-    TRACE("dwDevType %u dwFlags 0x%08x version 0x%04x id %d\n", dwDevType, dwFlags, version, id);
-
-    if (id >= find_joystick_devices()) return E_FAIL;
-
-    device = get_device_ref(id);
-
-    if ((dwDevType == 0) ||
-    ((dwDevType == DIDEVTYPE_JOYSTICK) && (version >= 0x0300 && version < 0x0800)) ||
-    (((dwDevType == DI8DEVCLASS_GAMECTRL) || (dwDevType == DI8DEVTYPE_JOYSTICK)) && (version >= 0x0800)))
-    {
-        if (dwFlags & DIEDFL_FORCEFEEDBACK) {
-            if(!device)
-                return S_FALSE;
-            if(get_ff(device, NULL) != S_OK)
-                return S_FALSE;
-        }
-        is_joystick = get_device_property_long(device, CFSTR(kIOHIDDeviceUsageKey)) == kHIDUsage_GD_Joystick;
-        /* Return joystick */
-        lpddi->guidInstance = DInput_Wine_OsX_Joystick_GUID;
-        lpddi->guidInstance.Data3 = id;
-        lpddi->guidProduct = DInput_PIDVID_Product_GUID;
-        lpddi->guidProduct.Data1 = make_vid_pid(device);
-        lpddi->dwDevType = get_device_type(version, is_joystick);
-        lpddi->dwDevType |= DIDEVTYPE_HID;
-        lpddi->wUsagePage = 0x01; /* Desktop */
-        if (is_joystick)
-            lpddi->wUsage = 0x04; /* Joystick */
-        else
-            lpddi->wUsage = 0x05; /* Game Pad */
-        sprintf(lpddi->tszInstanceName, "Joystick %d", id);
-
-        /* get the device name */
-        get_osx_device_name(id, lpddi->tszProductName, MAX_PATH);
-
-        lpddi->guidFFDriver = GUID_NULL;
-        return S_OK;
-    }
-
-    return S_FALSE;
-}
-
-static HRESULT joydev_enum_deviceW(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEW lpddi, DWORD version, int id)
+static HRESULT joydev_enum_device(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEW lpddi, DWORD version, int id)
 {
     char name[MAX_PATH];
     char friendly[32];
@@ -1323,13 +1277,13 @@ static unsigned short get_joystick_index(REFGUID guid)
     return 0xffff;
 }
 
-static HRESULT joydev_create_device(IDirectInputImpl *dinput, REFGUID rguid, REFIID riid, LPVOID *pdev, int unicode)
+static HRESULT joydev_create_device( IDirectInputImpl *dinput, REFGUID rguid, IDirectInputDevice8W **out )
 {
     unsigned short index;
     int joystick_devices_count;
 
-    TRACE("%p %s %s %p %i\n", dinput, debugstr_guid(rguid), debugstr_guid(riid), pdev, unicode);
-    *pdev = NULL;
+    TRACE( "%p %s %p\n", dinput, debugstr_guid( rguid ), out );
+    *out = NULL;
 
     if ((joystick_devices_count = find_joystick_devices()) == 0)
         return DIERR_DEVICENOTREG;
@@ -1340,36 +1294,11 @@ static HRESULT joydev_create_device(IDirectInputImpl *dinput, REFGUID rguid, REF
         JoystickImpl *This;
         HRESULT hr;
 
-        if (riid == NULL)
-            ;/* nothing */
-        else if (IsEqualGUID(&IID_IDirectInputDeviceA,  riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice2A, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice7A, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice8A, riid))
-        {
-            unicode = 0;
-        }
-        else if (IsEqualGUID(&IID_IDirectInputDeviceW,  riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice2W, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice7W, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice8W, riid))
-        {
-            unicode = 1;
-        }
-        else
-        {
-            WARN("no interface\n");
-            return DIERR_NOINTERFACE;
-        }
-
         if (FAILED(hr = alloc_device( rguid, dinput, &This, index ))) return hr;
 
         TRACE( "Created a Joystick device (%p)\n", This );
 
-        if (unicode)
-            *pdev = &This->generic.base.IDirectInputDevice8W_iface;
-        else
-            *pdev = &This->generic.base.IDirectInputDevice8A_iface;
+        *out = &This->generic.base.IDirectInputDevice8W_iface;
         return hr;
     }
 
@@ -1547,8 +1476,7 @@ static HRESULT WINAPI JoystickWImpl_SendForceFeedbackCommand(IDirectInputDevice8
 
 const struct dinput_device joystick_osx_device = {
   "Wine OS X joystick driver",
-  joydev_enum_deviceA,
-  joydev_enum_deviceW,
+  joydev_enum_device,
   joydev_create_device
 };
 
@@ -1556,7 +1484,7 @@ static const IDirectInputDevice8WVtbl JoystickWvt =
 {
     IDirectInputDevice2WImpl_QueryInterface,
     IDirectInputDevice2WImpl_AddRef,
-    IDirectInputDevice2WImpl_Release,
+    JoystickWGenericImpl_Release,
     JoystickWGenericImpl_GetCapabilities,
     IDirectInputDevice2WImpl_EnumObjects,
     JoystickWImpl_GetProperty,
@@ -1725,7 +1653,6 @@ const struct dinput_device joystick_osx_device = {
   "Wine OS X joystick driver",
   NULL,
   NULL,
-  NULL
 };
 
 #endif /* HAVE_IOHIDMANAGERCREATE */

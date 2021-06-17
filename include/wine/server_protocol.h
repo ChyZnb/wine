@@ -286,12 +286,16 @@ union rawinput
         unsigned int   param;
         unsigned short usage_page;
         unsigned short usage;
+        unsigned int   count;
+        unsigned int   length;
     } hid;
 };
 
 struct hardware_msg_data
 {
     lparam_t             info;
+    data_size_t          size;
+    int                  __pad;
     unsigned int         hw_id;
     unsigned int         flags;
     struct hw_msg_source source;
@@ -1726,22 +1730,6 @@ struct unlock_file_reply
 
 
 
-struct set_socket_event_request
-{
-    struct request_header __header;
-    obj_handle_t  handle;
-    unsigned int  mask;
-    obj_handle_t  event;
-    user_handle_t window;
-    unsigned int  msg;
-};
-struct set_socket_event_reply
-{
-    struct reply_header __header;
-};
-
-
-
 struct get_socket_event_request
 {
     struct request_header __header;
@@ -1754,9 +1742,7 @@ struct get_socket_event_reply
     struct reply_header __header;
     unsigned int mask;
     unsigned int pmask;
-    unsigned int state;
     /* VARARG(errors,ints); */
-    char __pad_20[4];
 };
 
 
@@ -1775,21 +1761,6 @@ struct get_socket_info_reply
     char __pad_20[4];
 };
 
-
-
-struct enable_socket_event_request
-{
-    struct request_header __header;
-    obj_handle_t handle;
-    unsigned int mask;
-    unsigned int sstate;
-    unsigned int cstate;
-    char __pad_28[4];
-};
-struct enable_socket_event_reply
-{
-    struct reply_header __header;
-};
 
 struct set_socket_deferred_request
 {
@@ -2761,7 +2732,8 @@ struct send_hardware_message_request
     user_handle_t   win;
     hw_input_t      input;
     unsigned int    flags;
-    char __pad_52[4];
+    /* VARARG(report,bytes); */
+    char __pad_60[4];
 };
 struct send_hardware_message_reply
 {
@@ -5513,10 +5485,8 @@ enum request
     REQ_get_volume_info,
     REQ_lock_file,
     REQ_unlock_file,
-    REQ_set_socket_event,
     REQ_get_socket_event,
     REQ_get_socket_info,
-    REQ_enable_socket_event,
     REQ_set_socket_deferred,
     REQ_recv_socket,
     REQ_poll_socket,
@@ -5797,10 +5767,8 @@ union generic_request
     struct get_volume_info_request get_volume_info_request;
     struct lock_file_request lock_file_request;
     struct unlock_file_request unlock_file_request;
-    struct set_socket_event_request set_socket_event_request;
     struct get_socket_event_request get_socket_event_request;
     struct get_socket_info_request get_socket_info_request;
-    struct enable_socket_event_request enable_socket_event_request;
     struct set_socket_deferred_request set_socket_deferred_request;
     struct recv_socket_request recv_socket_request;
     struct poll_socket_request poll_socket_request;
@@ -6079,10 +6047,8 @@ union generic_reply
     struct get_volume_info_reply get_volume_info_reply;
     struct lock_file_reply lock_file_reply;
     struct unlock_file_reply unlock_file_reply;
-    struct set_socket_event_reply set_socket_event_reply;
     struct get_socket_event_reply get_socket_event_reply;
     struct get_socket_info_reply get_socket_info_reply;
-    struct enable_socket_event_reply enable_socket_event_reply;
     struct set_socket_deferred_reply set_socket_deferred_reply;
     struct recv_socket_reply recv_socket_reply;
     struct poll_socket_reply poll_socket_reply;
@@ -6307,7 +6273,7 @@ union generic_reply
 
 /* ### protocol_version begin ### */
 
-#define SERVER_PROTOCOL_VERSION 708
+#define SERVER_PROTOCOL_VERSION 713
 
 /* ### protocol_version end ### */
 

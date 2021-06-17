@@ -53,6 +53,7 @@ static NTSTATUS  (WINAPI *pRtlGetExtendedContextLength2)(ULONG context_flags, UL
 static NTSTATUS  (WINAPI *pRtlInitializeExtendedContext)(void *context, ULONG context_flags, CONTEXT_EX **context_ex);
 static NTSTATUS  (WINAPI *pRtlInitializeExtendedContext2)(void *context, ULONG context_flags, CONTEXT_EX **context_ex,
         ULONG64 compaction_mask);
+static NTSTATUS  (WINAPI *pRtlCopyContext)(CONTEXT *dst, DWORD context_flags, CONTEXT *src);
 static NTSTATUS  (WINAPI *pRtlCopyExtendedContext)(CONTEXT_EX *dst, ULONG context_flags, CONTEXT_EX *src);
 static void *    (WINAPI *pRtlLocateExtendedFeature)(CONTEXT_EX *context_ex, ULONG feature_id, ULONG *length);
 static void *    (WINAPI *pRtlLocateLegacyContext)(CONTEXT_EX *context_ex, ULONG *length);
@@ -75,7 +76,6 @@ static BOOL      (WINAPI *pInitializeContext2)(void *buffer, DWORD context_flags
 static void *    (WINAPI *pLocateXStateFeature)(CONTEXT *context, DWORD feature_id, DWORD *length);
 static BOOL      (WINAPI *pSetXStateFeaturesMask)(CONTEXT *context, DWORD64 feature_mask);
 static BOOL      (WINAPI *pGetXStateFeaturesMask)(CONTEXT *context, DWORD64 *feature_mask);
-static BOOL      (WINAPI *pCopyContext)(CONTEXT *dst, DWORD context_flags, CONTEXT *src);
 
 #define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
 
@@ -4250,23 +4250,28 @@ static void test_thread_context(void)
     {
         DWORD R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, Sp, Lr, Pc, Cpsr;
     } expect;
-    NTSTATUS (*func_ptr)( void *arg1, void *arg2, struct expected *res, void *func ) = code_mem;
+    NTSTATUS (*func_ptr)( void *arg1, void *arg2, struct expected *res, void *func );
 
-    static const DWORD call_func[] =
+    static const WORD call_func[] =
     {
-        0xe92d4002,  /* push    {r1, lr} */
-        0xe8821fff,  /* stm     r2, {r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, sl, fp, ip} */
-        0xe582d034,  /* str     sp, [r2, #52] */
-        0xe582e038,  /* str     lr, [r2, #56] */
-        0xe10f1000,  /* mrs     r1, CPSR */
-        0xe5821040,  /* str     r1, [r2, #64] */
-        0xe59d1000,  /* ldr     r1, [sp] */
-        0xe582f03c,  /* str     pc, [r2, #60] */
-        0xe12fff33,  /* blx     r3 */
-        0xe8bd8002,  /* pop     {r1, pc} */
+        0xb502,            /* push    {r1, lr} */
+        0xe882, 0x1fff,    /* stmia.w r2, {r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, sl, fp, ip} */
+        0xf8c2, 0xd034,    /* str.w   sp, [r2, #52] */
+        0xf8c2, 0xe038,    /* str.w   lr, [r2, #56] */
+        0xf3ef, 0x8100,    /* mrs     r1, CPSR */
+        0xf041, 0x0120,    /* orr.w   r1, r1, #32 */
+        0x6411,            /* str     r1, [r2, #64] */
+        0x9900,            /* ldr     r1, [sp, #0] */
+        0x4679,            /* mov     r1, pc */
+        0xf101, 0x0109,    /* add.w   r1, r1, #9 */
+        0x63d1,            /* str     r1, [r2, #60] */
+        0x9900,            /* ldr     r1, [sp, #0] */
+        0x4798,            /* blx     r3 */
+        0xbd02,            /* pop     {r1, pc} */
     };
 
-    memcpy( func_ptr, call_func, sizeof(call_func) );
+    memcpy( code_mem, call_func, sizeof(call_func) );
+    func_ptr = (void *)((char *)code_mem + 1);  /* thumb */
 
 #define COMPARE(reg) \
     ok( context.reg == expect.reg, "wrong " #reg " %08x/%08x\n", context.reg, expect.reg )
@@ -4283,9 +4288,9 @@ static void test_thread_context(void)
            context.R0, context.R1, context.R2, context.R3, context.R4, context.R5, context.R6, context.R7,
            context.R8, context.R9, context.R10, context.R11, context.R12, context.Sp, context.Lr, context.Pc, context.Cpsr );
 
-    ok( context.ContextFlags == CONTEXT_FULL,
+    ok( context.ContextFlags == (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT),
         "wrong flags %08x\n", context.ContextFlags );
-    COMPARE( R0 );
+    ok( !context.R0, "wrong R0 %08x\n", context.R0 );
     COMPARE( R1 );
     COMPARE( R2 );
     COMPARE( R3 );
@@ -4301,7 +4306,7 @@ static void test_thread_context(void)
     COMPARE( Sp );
     COMPARE( Pc );
     COMPARE( Cpsr );
-    ok( context.Lr == expect.Pc, "wrong Lr %08x/%08x\n", context.Lr, expect.Pc );
+    ok( !context.Lr, "wrong Lr %08x\n", context.Lr );
 
     memset( &context, 0xcc, sizeof(context) );
     memset( &expect, 0xcc, sizeof(expect) );
@@ -4326,13 +4331,13 @@ static void test_thread_context(void)
     COMPARE( R9 );
     COMPARE( R10 );
     COMPARE( R11 );
-    ok( (context.Cpsr & 0xff0f0000) == (expect.Cpsr & 0xff0f0000),
+    ok( (context.Cpsr & 0xff0f0030) == (expect.Cpsr & 0xff0f0030),
         "wrong Cpsr %08x/%08x\n", context.Cpsr, expect.Cpsr );
-    ok( context.Sp == expect.Sp - 8,
-        "wrong Sp %08x/%08x\n", context.Sp, expect.Sp - 8 );
+    ok( context.Sp == expect.Sp - 16,
+        "wrong Sp %08x/%08x\n", context.Sp, expect.Sp - 16 );
     /* Pc is somewhere close to the NtGetContextThread implementation */
-    ok( (char *)context.Pc >= (char *)pNtGetContextThread - 0x40000 &&
-        (char *)context.Pc <= (char *)pNtGetContextThread + 0x40000,
+    ok( (char *)context.Pc >= (char *)pNtGetContextThread &&
+        (char *)context.Pc <= (char *)pNtGetContextThread + 0x10,
         "wrong Pc %08x/%08x\n", context.Pc, (DWORD)pNtGetContextThread );
 #undef COMPARE
 }
@@ -4427,7 +4432,6 @@ static void test_debugger(DWORD cont_status)
             }
             else
             {
-#if 0  /* RtlRaiseException test disabled for now */
                 if (stage == 1)
                 {
                     ok((char *)ctx.Pc == (char *)code_mem_address + 0xb, "Pc at %x instead of %p\n",
@@ -4461,16 +4465,14 @@ static void test_debugger(DWORD cont_status)
                             ok((char *)ctx.Pc == (char *)code_mem_address + 0xa,
                                "Pc at 0x%x instead of %p\n", ctx.Pc, (char *)code_mem_address + 0xa);
                             /* need to fixup Pc for debuggee */
-                            /*ctx.Pc += 2; */
+                            ctx.Pc += 2;
                         }
                         else ok((char *)ctx.Pc == (char *)code_mem_address + 0xb,
                                 "Pc at 0x%x instead of %p\n", ctx.Pc, (char *)code_mem_address + 0xb);
                         /* here we handle exception */
                     }
                 }
-                else
-#endif
-                if (stage == 7 || stage == 8)
+                else if (stage == 7 || stage == 8)
                 {
                     ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
                        "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
@@ -4482,8 +4484,8 @@ static void test_debugger(DWORD cont_status)
                 {
                     ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
                        "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
-                    ok((char *)ctx.Pc == (char *)code_mem_address + 4,
-                       "expected Pc = %p, got 0x%x\n", (char *)code_mem_address + 4, ctx.Pc);
+                    ok((char *)ctx.Pc == (char *)code_mem_address + 3,
+                       "expected Pc = %p, got 0x%x\n", (char *)code_mem_address + 3, ctx.Pc);
                     if (stage == 10) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
                 }
                 else if (stage == 11 || stage == 12 || stage == 13)
@@ -5434,7 +5436,7 @@ static void test_thread_context(void)
     {
         ULONG64 X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16,
             X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, Fp, Lr, Sp, Pc;
-        ULONG Cpsr;
+        ULONG Cpsr, Fpcr, Fpsr;
     } expect;
     NTSTATUS (*func_ptr)( void *arg1, void *arg2, struct expected *res, void *func ) = code_mem;
 
@@ -5460,10 +5462,14 @@ static void test_thread_context(void)
         0x910003e1,  /* mov     x1, sp */
         0xf9007c41,  /* str     x1, [x2, #248] */
         0x90000001,  /* adrp    x1, 1f */
-        0x9101a021,  /* add     x1, x1, #:lo12:1f */
+        0x9101e021,  /* add     x1, x1, #:lo12:1f */
         0xf9008041,  /* str     x1, [x2, #256] */
         0xd53b4201,  /* mrs     x1, nzcv */
         0xb9010841,  /* str     w1, [x2, #264] */
+        0xd53b4401,  /* mrs     x1, fpcr */
+        0xb9010c41,  /* str     w1, [x2, #268] */
+        0xd53b4421,  /* mrs     x1, fpsr */
+        0xb9011041,  /* str     w1, [x2, #272] */
         0xf9400441,  /* ldr     x1, [x2, #8] */
         0xd63f0060,  /* blr     x3 */
         0xa8c17bfd,  /* 1: ldp     x29, x30, [sp], #16 */
@@ -5501,7 +5507,7 @@ static void test_thread_context(void)
 
     ok( context.ContextFlags == CONTEXT_FULL,
         "wrong flags %08x\n", context.ContextFlags );
-    COMPARE( X0 );
+    ok( !context.X0, "wrong X0 %p\n", (void *)context.X0 );
     COMPARE( X1 );
     COMPARE( X2 );
     COMPARE( X3 );
@@ -5534,7 +5540,9 @@ static void test_thread_context(void)
     COMPARE( Sp );
     COMPARE( Pc );
     COMPARE( Cpsr );
-    ok( context.Lr == expect.Pc, "wrong Lr %p/%p\n", (void *)context.Lr, (void *)expect.Pc );
+    COMPARE( Fpcr );
+    COMPARE( Fpsr );
+    ok( !context.Lr, "wrong Lr %p\n", (void *)context.Lr );
 
     memset( &context, 0xcc, sizeof(context) );
     memset( &expect, 0xcc, sizeof(expect) );
@@ -5563,7 +5571,6 @@ static void test_thread_context(void)
            (void *)context.X28, (void *)context.Fp, (void *)context.Lr, (void *)context.Sp,
            (void *)context.Pc, context.Cpsr );
     /* other registers are not preserved */
-    todo_wine COMPARE( X18 );
     COMPARE( X19 );
     COMPARE( X20 );
     COMPARE( X21 );
@@ -5575,12 +5582,12 @@ static void test_thread_context(void)
     COMPARE( X27 );
     COMPARE( X28 );
     COMPARE( Fp );
+    COMPARE( Fpcr );
+    COMPARE( Fpsr );
     ok( context.Lr == expect.Pc, "wrong Lr %p/%p\n", (void *)context.Lr, (void *)expect.Pc );
-    ok( context.Sp == expect.Sp - 16,
-        "wrong Sp %p/%p\n", (void *)context.Sp, (void *)(expect.Sp - 16) );
-    /* Pc is somewhere close to the NtGetContextThread implementation */
-    ok( (char *)context.Pc >= (char *)pNtGetContextThread - 0x40000 &&
-        (char *)context.Pc <= (char *)pNtGetContextThread + 0x40000,
+    ok( context.Sp == expect.Sp, "wrong Sp %p/%p\n", (void *)context.Sp, (void *)expect.Sp );
+    ok( (char *)context.Pc >= (char *)pNtGetContextThread &&
+        (char *)context.Pc <= (char *)pNtGetContextThread + 32,
         "wrong Pc %p/%p\n", (void *)context.Pc, pNtGetContextThread );
 #undef COMPARE
 }
@@ -5675,7 +5682,6 @@ static void test_debugger(DWORD cont_status)
             }
             else
             {
-#if 0  /* RtlRaiseException test disabled for now */
                 if (stage == 1)
                 {
                     ok((char *)ctx.Pc == (char *)code_mem_address + 0xb, "Pc at %p instead of %p\n",
@@ -5716,9 +5722,7 @@ static void test_debugger(DWORD cont_status)
                         /* here we handle exception */
                     }
                 }
-                else
-#endif
-                if (stage == 7 || stage == 8)
+                else if (stage == 7 || stage == 8)
                 {
                     ok(de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT,
                        "expected EXCEPTION_BREAKPOINT, got %08x\n", de.u.Exception.ExceptionRecord.ExceptionCode);
@@ -5754,7 +5758,7 @@ static void test_debugger(DWORD cont_status)
         else if (de.dwDebugEventCode == OUTPUT_DEBUG_STRING_EVENT)
         {
             int stage;
-            char buffer[64];
+            char buffer[128];
 
             status = pNtReadVirtualMemory(pi.hProcess, &test_stage, &stage,
                                           sizeof(stage), &size_read);
@@ -5772,7 +5776,8 @@ static void test_debugger(DWORD cont_status)
             if (stage == 3 || stage == 4)
                 ok(!strcmp(buffer, "Hello World"), "got unexpected debug string '%s'\n", buffer);
             else /* ignore unrelated debug strings like 'SHIMVIEW: ShimInfo(Complete)' */
-                ok(strstr(buffer, "SHIMVIEW") != NULL, "unexpected stage %x, got debug string event '%s'\n", stage, buffer);
+                ok(strstr(buffer, "SHIMVIEW") || !strncmp(buffer, "RTL:", 4),
+                   "unexpected stage %x, got debug string event '%s'\n", stage, buffer);
 
             if (stage == 4) continuestatus = DBG_EXCEPTION_NOT_HANDLED;
         }
@@ -6307,19 +6312,21 @@ static LONG CALLBACK breakpoint_handler(EXCEPTION_POINTERS *ExceptionInfo)
        "got ExceptionInformation[0] = %lx\n", rec->ExceptionInformation[0]);
     ExceptionInfo->ContextRecord->Rip = (DWORD_PTR)code_mem + 2;
 #elif defined(__arm__)
-    ok(ExceptionInfo->ContextRecord->Pc == (DWORD)code_mem + 4,
-       "expected pc = %lx, got %lx\n", (DWORD)code_mem + 4, ExceptionInfo->ContextRecord->Pc);
+    ok(ExceptionInfo->ContextRecord->Pc == (DWORD)code_mem + 1,
+       "expected pc = %x, got %x\n", (DWORD)code_mem + 1, ExceptionInfo->ContextRecord->Pc);
     ok(rec->NumberParameters == 1,
        "ExceptionParameters is %d instead of 1\n", rec->NumberParameters);
     ok(rec->ExceptionInformation[0] == 0,
        "got ExceptionInformation[0] = %lx\n", rec->ExceptionInformation[0]);
+    ExceptionInfo->ContextRecord->Pc += 2;
 #elif defined(__aarch64__)
-    ok(ExceptionInfo->ContextRecord->Pc == (DWORD_PTR)code_mem + 4,
-       "expected pc = %lx, got %lx\n", (DWORD_PTR)code_mem + 4, ExceptionInfo->ContextRecord->Pc);
+    ok(ExceptionInfo->ContextRecord->Pc == (DWORD_PTR)code_mem,
+       "expected pc = %lx, got %lx\n", (DWORD_PTR)code_mem, ExceptionInfo->ContextRecord->Pc);
     ok(rec->NumberParameters == 1,
        "ExceptionParameters is %d instead of 1\n", rec->NumberParameters);
     ok(rec->ExceptionInformation[0] == 0,
        "got ExceptionInformation[0] = %lx\n", rec->ExceptionInformation[0]);
+    ExceptionInfo->ContextRecord->Pc += 4;
 #endif
 
     breakpoint_exceptions++;
@@ -6329,9 +6336,9 @@ static LONG CALLBACK breakpoint_handler(EXCEPTION_POINTERS *ExceptionInfo)
 #if defined(__i386__) || defined(__x86_64__)
 static const BYTE breakpoint_code[] = { 0xcd, 0x03, 0xc3 };   /* int $0x3; ret */
 #elif defined(__arm__)
-static const DWORD breakpoint_code[] = { 0xe1200070, 0xe12fff1e };  /* bkpt #0; bx lr */
+static const DWORD breakpoint_code[] = { 0xdefe, 0x4770 };  /* udf #0xfe; bx lr */
 #elif defined(__aarch64__)
-static const DWORD breakpoint_code[] = { 0xd4200000, 0xd65f03c0 };  /* brk #0; ret */
+static const DWORD breakpoint_code[] = { 0xd43e0000, 0xd65f03c0 };  /* brk #0xf000; ret */
 #endif
 
 static void test_breakpoint(DWORD numexc)
@@ -6340,7 +6347,9 @@ static void test_breakpoint(DWORD numexc)
     void *vectored_handler;
 
     memcpy(code_mem, breakpoint_code, sizeof(breakpoint_code));
-
+#ifdef __arm__
+    func = (void *)((char *)code_mem + 1);  /* thumb */
+#endif
     vectored_handler = pRtlAddVectoredExceptionHandler(TRUE, &breakpoint_handler);
     ok(vectored_handler != 0, "RtlAddVectoredExceptionHandler failed\n");
 
@@ -6421,8 +6430,6 @@ static LONG CALLBACK invalid_handle_vectored_handler(EXCEPTION_POINTERS *Excepti
 static void test_closehandle(DWORD numexc, HANDLE handle)
 {
     PVOID vectored_handler;
-    NTSTATUS status;
-    DWORD res;
 
     if (!pRtlAddVectoredExceptionHandler || !pRtlRemoveVectoredExceptionHandler || !pRtlRaiseException)
     {
@@ -6434,17 +6441,12 @@ static void test_closehandle(DWORD numexc, HANDLE handle)
     ok(vectored_handler != 0, "RtlAddVectoredExceptionHandler failed\n");
 
     invalid_handle_exceptions = 0;
-    res = CloseHandle(handle);
-
-    ok(!res || (is_wow64 && res), "CloseHandle(%p) unexpectedly succeeded\n", handle);
-    ok(GetLastError() == ERROR_INVALID_HANDLE, "wrong error code %d instead of %d\n",
-       GetLastError(), ERROR_INVALID_HANDLE);
+    CloseHandle(handle);
     ok(invalid_handle_exceptions == numexc, "CloseHandle generated %d exceptions, expected %d\n",
        invalid_handle_exceptions, numexc);
 
     invalid_handle_exceptions = 0;
-    status = pNtClose(handle);
-    ok(status == STATUS_INVALID_HANDLE || (is_wow64 && status == 0), "NtClose(%p) returned status %08x\n", handle, status);
+    pNtClose(handle);
     ok(invalid_handle_exceptions == numexc, "NtClose generated %d exceptions, expected %d\n",
        invalid_handle_exceptions, numexc);
 
@@ -8042,32 +8044,28 @@ static void test_copy_context(void)
         {0x0, 0x1}, {0x1000, 0},
     };
 
-    static const struct
-    {
-        ULONG flags;
-    }
-    tests[] =
+    static const ULONG tests[] =
     {
         /* AMD64 */
-        {0x100000 | 0x01}, /* CONTEXT_CONTROL */
-        {0x100000 | 0x02}, /* CONTEXT_INTEGER */
-        {0x100000 | 0x04}, /* CONTEXT_SEGMENTS */
-        {0x100000 | 0x08}, /* CONTEXT_FLOATING_POINT */
-        {0x100000 | 0x10}, /* CONTEXT_DEBUG_REGISTERS */
-        {0x100000 | 0x0b}, /* CONTEXT_FULL */
-        {0x100000 | 0x40}, /* CONTEXT_XSTATE */
-        {0x100000 | 0x1f}, /* CONTEXT_ALL */
+        CONTEXT_AMD64_CONTROL,
+        CONTEXT_AMD64_INTEGER,
+        CONTEXT_AMD64_SEGMENTS,
+        CONTEXT_AMD64_FLOATING_POINT,
+        CONTEXT_AMD64_DEBUG_REGISTERS,
+        CONTEXT_AMD64_FULL,
+        CONTEXT_AMD64_XSTATE,
+        CONTEXT_AMD64_ALL,
         /* X86 */
-        { 0x10000 | 0x01}, /* CONTEXT_CONTROL */
-        { 0x10000 | 0x02}, /* CONTEXT_INTEGER */
-        { 0x10000 | 0x04}, /* CONTEXT_SEGMENTS */
-        { 0x10000 | 0x08}, /* CONTEXT_FLOATING_POINT */
-        { 0x10000 | 0x10}, /* CONTEXT_DEBUG_REGISTERS */
-        { 0x10000 | 0x20}, /* CONTEXT_EXTENDED_REGISTERS */
-        { 0x10000 | 0x40}, /* CONTEXT_XSTATE */
-        { 0x10000 | 0x3f}, /* CONTEXT_ALL */
+        CONTEXT_I386_CONTROL,
+        CONTEXT_I386_INTEGER,
+        CONTEXT_I386_SEGMENTS,
+        CONTEXT_I386_FLOATING_POINT,
+        CONTEXT_I386_DEBUG_REGISTERS,
+        CONTEXT_I386_EXTENDED_REGISTERS,
+        CONTEXT_I386_XSTATE,
+        CONTEXT_I386_ALL
     };
-    static const ULONG arch_flags[] = {0x100000, 0x10000};
+    static const ULONG arch_flags[] = {CONTEXT_AMD64, CONTEXT_i386};
 
     DECLSPEC_ALIGN(64) BYTE src_context_buffer[4096];
     DECLSPEC_ALIGN(64) BYTE dst_context_buffer[4096];
@@ -8097,8 +8095,9 @@ static void test_copy_context(void)
 
     for (i = 0; i < ARRAY_SIZE(tests); ++i)
     {
-        flags = tests[i].flags;
-        flags_offset = (flags & 0x100000) ? 0x30 : 0;
+        flags = tests[i];
+        flags_offset = (flags & CONTEXT_AMD64) ? offsetof(AMD64_CONTEXT,ContextFlags)
+                                               : offsetof(I386_CONTEXT,ContextFlags);
 
         memset(dst_context_buffer, 0xdd, sizeof(dst_context_buffer));
         memset(src_context_buffer, 0xcc, sizeof(src_context_buffer));
@@ -8131,7 +8130,7 @@ static void test_copy_context(void)
         ok(!status, "Got unexpected status %#x, flags %#x.\n", status, flags);
 
         context_length = (BYTE *)dst_ex - (BYTE *)dst + dst_ex->All.Length;
-        check_changes_in_range((BYTE *)dst, flags & 0x100000 ? &ranges_amd64[0] : &ranges_x86[0],
+        check_changes_in_range((BYTE *)dst, flags & CONTEXT_AMD64 ? &ranges_amd64[0] : &ranges_x86[0],
                 flags, context_length);
 
         ok(*(DWORD *)((BYTE *)dst + flags_offset) == flags, "Got unexpected ContextFlags %#x, flags %#x.\n",
@@ -8143,35 +8142,30 @@ static void test_copy_context(void)
         *(DWORD *)((BYTE *)src + flags_offset) = 0;
         *(DWORD *)((BYTE *)dst + flags_offset) = 0;
         SetLastError(0xdeadbeef);
-        bret = pCopyContext(dst, flags | 0x40, src);
-        ok((!bret && GetLastError() == (enabled_features ? ERROR_INVALID_PARAMETER : ERROR_NOT_SUPPORTED))
-                || broken(!bret && GetLastError() == ERROR_INVALID_PARAMETER),
-                "Got unexpected bret %#x, GetLastError() %#x, flags %#x.\n",
-                bret, GetLastError(), flags);
+        status = pRtlCopyContext(dst, flags | 0x40, src);
+        ok(status == (enabled_features ? STATUS_INVALID_PARAMETER : STATUS_NOT_SUPPORTED)
+           || broken(status == STATUS_INVALID_PARAMETER),
+           "Got unexpected status %#x, flags %#x.\n", status, flags);
         ok(*(DWORD *)((BYTE *)dst + flags_offset) == 0, "Got unexpected ContextFlags %#x, flags %#x.\n",
                 *(DWORD *)((BYTE *)dst + flags_offset), flags);
-        check_changes_in_range((BYTE *)dst, flags & 0x100000 ? &ranges_amd64[0] : &ranges_x86[0],
+        check_changes_in_range((BYTE *)dst, flags & CONTEXT_AMD64 ? &ranges_amd64[0] : &ranges_x86[0],
                 0, context_length);
 
-        *(DWORD *)((BYTE *)dst + flags_offset) = flags & 0x110000;
+        *(DWORD *)((BYTE *)dst + flags_offset) = flags & (CONTEXT_AMD64 | CONTEXT_i386);
         *(DWORD *)((BYTE *)src + flags_offset) = flags;
-        SetLastError(0xdeadbeef);
-        bret = pCopyContext(dst, flags, src);
+        status = pRtlCopyContext(dst, flags, src);
         if (flags & 0x40)
-            ok((!bret && GetLastError() == ERROR_MORE_DATA)
-                    || broken(!(flags & CONTEXT_NATIVE) && !bret && GetLastError() == ERROR_INVALID_PARAMETER),
-                    "Got unexpected bret %#x, GetLastError() %#x, flags %#x.\n",
-                    bret, GetLastError(), flags);
+            ok((status == STATUS_BUFFER_OVERFLOW)
+               || broken(!(flags & CONTEXT_NATIVE) && status == STATUS_INVALID_PARAMETER),
+               "Got unexpected status %#x, flags %#x.\n", status, flags);
         else
-            ok((bret && GetLastError() == 0xdeadbeef)
-                    || broken(!(flags & CONTEXT_NATIVE) && !bret && GetLastError() == ERROR_INVALID_PARAMETER),
-                    "Got unexpected bret %#x, GetLastError() %#x, flags %#x.\n",
-                    bret, GetLastError(), flags);
-        if (bret)
+            ok(!status || broken(!(flags & CONTEXT_NATIVE) && status == STATUS_INVALID_PARAMETER),
+               "Got unexpected status %#x, flags %#x.\n", status, flags);
+        if (!status)
         {
             ok(*(DWORD *)((BYTE *)dst + flags_offset) == flags, "Got unexpected ContextFlags %#x, flags %#x.\n",
                     *(DWORD *)((BYTE *)dst + flags_offset), flags);
-            check_changes_in_range((BYTE *)dst, flags & 0x100000 ? &ranges_amd64[0] : &ranges_x86[0],
+            check_changes_in_range((BYTE *)dst, flags & CONTEXT_AMD64 ? &ranges_amd64[0] : &ranges_x86[0],
                     flags, context_length);
         }
         else
@@ -8179,7 +8173,7 @@ static void test_copy_context(void)
             ok(*(DWORD *)((BYTE *)dst + flags_offset) == (flags & 0x110000),
                     "Got unexpected ContextFlags %#x, flags %#x.\n",
                     *(DWORD *)((BYTE *)dst + flags_offset), flags);
-            check_changes_in_range((BYTE *)dst, flags & 0x100000 ? &ranges_amd64[0] : &ranges_x86[0],
+            check_changes_in_range((BYTE *)dst, flags & CONTEXT_AMD64 ? &ranges_amd64[0] : &ranges_x86[0],
                     0, context_length);
         }
     }
@@ -8187,8 +8181,9 @@ static void test_copy_context(void)
     for (i = 0; i < ARRAY_SIZE(arch_flags); ++i)
     {
         flags = arch_flags[i] | 0x42;
-        flags_offset = (flags & 0x100000) ? 0x30 : 0;
-        context_length = (flags & 0x100000) ? 0x4d0 : 0x2cc;
+        flags_offset = (flags & CONTEXT_AMD64) ? offsetof(AMD64_CONTEXT,ContextFlags)
+                                               : offsetof(I386_CONTEXT,ContextFlags);
+        context_length = (flags & CONTEXT_AMD64) ? sizeof(AMD64_CONTEXT) : sizeof(I386_CONTEXT);
 
         memset(dst_context_buffer, 0xdd, sizeof(dst_context_buffer));
         memset(src_context_buffer, 0xcc, sizeof(src_context_buffer));
@@ -8317,12 +8312,9 @@ static void test_copy_context(void)
         memset(&dst_xs->YmmContext, 0xdd, sizeof(dst_xs->YmmContext));
         dst_xs->CompactionMask = 0xdddddddddddddddd;
         dst_xs->Mask = 0xdddddddddddddddd;
-        SetLastError(0xdeadbeef);
-        bret = pCopyContext(dst, flags, src);
-        ok((bret && GetLastError() == 0xdeadbeef)
-                || broken(!(flags & CONTEXT_NATIVE) && !bret && GetLastError() == ERROR_INVALID_PARAMETER),
-                "Got unexpected bret %#x, GetLastError() %#x, flags %#x.\n",
-                bret, GetLastError(), flags);
+        status = pRtlCopyContext(dst, flags, src);
+        ok(!status || broken(!(flags & CONTEXT_NATIVE) && status == STATUS_INVALID_PARAMETER),
+           "Got unexpected status %#x, flags %#x.\n", status, flags);
         ok(dst_xs->Mask == 0xdddddddddddddddd || broken(dst_xs->Mask == 4), "Got unexpected Mask %s, flags %#x.\n",
                 wine_dbgstr_longlong(dst_xs->Mask), flags);
         ok(dst_xs->CompactionMask == 0xdddddddddddddddd || broken(dst_xs->CompactionMask == expected_compaction),
@@ -8387,6 +8379,7 @@ START_TEST(exception)
     X(RtlLocateLegacyContext);
     X(RtlSetExtendedFeaturesMask);
     X(RtlGetExtendedFeaturesMask);
+    X(RtlCopyContext);
     X(RtlCopyExtendedContext);
 #undef X
 
@@ -8399,7 +8392,6 @@ START_TEST(exception)
     X(LocateXStateFeature);
     X(SetXStateFeaturesMask);
     X(GetXStateFeaturesMask);
-    X(CopyContext);
 #undef X
 
     if (pRtlAddVectoredExceptionHandler && pRtlRemoveVectoredExceptionHandler)

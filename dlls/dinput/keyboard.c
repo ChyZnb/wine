@@ -149,30 +149,6 @@ static DWORD get_keyboard_subtype(void)
     return dev_subtype;
 }
 
-static void fill_keyboard_dideviceinstanceA(LPDIDEVICEINSTANCEA lpddi, DWORD version, DWORD subtype) {
-    DWORD dwSize;
-    DIDEVICEINSTANCEA ddi;
-    
-    dwSize = lpddi->dwSize;
-
-    TRACE("%d %p\n", dwSize, lpddi);
-    
-    memset(lpddi, 0, dwSize);
-    memset(&ddi, 0, sizeof(ddi));
-
-    ddi.dwSize = dwSize;
-    ddi.guidInstance = GUID_SysKeyboard;/* DInput's GUID */
-    ddi.guidProduct = GUID_SysKeyboard;
-    if (version >= 0x0800)
-        ddi.dwDevType = DI8DEVTYPE_KEYBOARD | (subtype << 8);
-    else
-        ddi.dwDevType = DIDEVTYPE_KEYBOARD | (subtype << 8);
-    strcpy(ddi.tszInstanceName, "Keyboard");
-    strcpy(ddi.tszProductName, "Wine Keyboard");
-
-    memcpy(lpddi, &ddi, (dwSize < sizeof(ddi) ? dwSize : sizeof(ddi)));
-}
-
 static void fill_keyboard_dideviceinstanceW(LPDIDEVICEINSTANCEW lpddi, DWORD version, DWORD subtype) {
     DWORD dwSize;
     DIDEVICEINSTANCEW ddi;
@@ -197,28 +173,7 @@ static void fill_keyboard_dideviceinstanceW(LPDIDEVICEINSTANCEW lpddi, DWORD ver
     memcpy(lpddi, &ddi, (dwSize < sizeof(ddi) ? dwSize : sizeof(ddi)));
 }
  
-static HRESULT keyboarddev_enum_deviceA(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEA lpddi, DWORD version, int id)
-{
-  if (id != 0)
-    return E_FAIL;
-
-  if (dwFlags & DIEDFL_FORCEFEEDBACK)
-    return S_FALSE;
-
-  if ((dwDevType == 0) ||
-      ((dwDevType == DIDEVTYPE_KEYBOARD) && (version < 0x0800)) ||
-      (((dwDevType == DI8DEVCLASS_KEYBOARD) || (dwDevType == DI8DEVTYPE_KEYBOARD)) && (version >= 0x0800))) {
-    TRACE("Enumerating the Keyboard device\n");
- 
-    fill_keyboard_dideviceinstanceA(lpddi, version, get_keyboard_subtype());
-    
-    return S_OK;
-  }
-
-  return S_FALSE;
-}
-
-static HRESULT keyboarddev_enum_deviceW(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEW lpddi, DWORD version, int id)
+static HRESULT keyboarddev_enum_device(DWORD dwDevType, DWORD dwFlags, LPDIDEVICEINSTANCEW lpddi, DWORD version, int id)
 {
   if (id != 0)
     return E_FAIL;
@@ -283,48 +238,21 @@ failed:
     return DIERR_OUTOFMEMORY;
 }
 
-
-static HRESULT keyboarddev_create_device(IDirectInputImpl *dinput, REFGUID rguid, REFIID riid, LPVOID *pdev, int unicode)
+static HRESULT keyboarddev_create_device( IDirectInputImpl *dinput, REFGUID rguid, IDirectInputDevice8W **out )
 {
-    TRACE("%p %s %s %p %i\n", dinput, debugstr_guid(rguid), debugstr_guid(riid), pdev, unicode);
-    *pdev = NULL;
+    TRACE( "%p %s %p\n", dinput, debugstr_guid( rguid ), out );
+    *out = NULL;
 
     if (IsEqualGUID(&GUID_SysKeyboard, rguid)) /* Wine Keyboard */
     {
         SysKeyboardImpl *This;
         HRESULT hr;
 
-        if (riid == NULL)
-            ;/* nothing */
-        else if (IsEqualGUID(&IID_IDirectInputDeviceA,  riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice2A, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice7A, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice8A, riid))
-        {
-            unicode = 0;
-        }
-        else if (IsEqualGUID(&IID_IDirectInputDeviceW,  riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice2W, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice7W, riid) ||
-                 IsEqualGUID(&IID_IDirectInputDevice8W, riid))
-        {
-            unicode = 1;
-        }
-        else
-        {
-            WARN("no interface\n");
-            return DIERR_NOINTERFACE;
-        }
-
         if (FAILED(hr = alloc_device( rguid, dinput, &This ))) return hr;
 
         TRACE( "Created a Keyboard device (%p)\n", This );
 
-        if (unicode)
-            *pdev = &This->base.IDirectInputDevice8W_iface;
-        else
-            *pdev = &This->base.IDirectInputDevice8A_iface;
-
+        *out = &This->base.IDirectInputDevice8W_iface;
         return DI_OK;
     }
 
@@ -333,8 +261,7 @@ static HRESULT keyboarddev_create_device(IDirectInputImpl *dinput, REFGUID rguid
 
 const struct dinput_device keyboard_device = {
   "Wine keyboard driver",
-  keyboarddev_enum_deviceA,
-  keyboarddev_enum_deviceW,
+  keyboarddev_enum_device,
   keyboarddev_create_device
 };
 

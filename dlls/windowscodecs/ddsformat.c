@@ -1573,8 +1573,27 @@ static ULONG WINAPI DdsFrameEncode_Release(IWICBitmapFrameEncode *iface)
 static HRESULT WINAPI DdsFrameEncode_Initialize(IWICBitmapFrameEncode *iface,
                                                 IPropertyBag2 *encoderOptions)
 {
-    FIXME("(%p,%p): stub\n", iface, encoderOptions);
-    return E_NOTIMPL;
+    DdsFrameEncode *This = impl_from_IWICBitmapFrameEncode(iface);
+    HRESULT hr;
+
+    TRACE("(%p,%p)\n", iface, encoderOptions);
+    if (encoderOptions) FIXME("encoder options are not supported for DDS.\n");
+
+    EnterCriticalSection(&This->parent->lock);
+
+    if (This->initialized)
+    {
+        hr = WINCODEC_ERR_WRONGSTATE;
+    }
+    else
+    {
+        This->initialized = TRUE;
+        hr = S_OK;
+    }
+
+    LeaveCriticalSection(&This->parent->lock);
+
+    return hr;
 }
 
 static HRESULT WINAPI DdsFrameEncode_SetSize(IWICBitmapFrameEncode *iface,
@@ -1632,8 +1651,30 @@ static HRESULT WINAPI DdsFrameEncode_SetResolution(IWICBitmapFrameEncode *iface,
 static HRESULT WINAPI DdsFrameEncode_SetPixelFormat(IWICBitmapFrameEncode *iface,
                                                     WICPixelFormatGUID *pixelFormat)
 {
-    FIXME("(%p,%s): stub\n", iface, debugstr_guid(pixelFormat));
-    return E_NOTIMPL;
+    DdsFrameEncode *This = impl_from_IWICBitmapFrameEncode(iface);
+    HRESULT hr;
+
+    TRACE("(%p,%s)\n", iface, debugstr_guid(pixelFormat));
+
+    EnterCriticalSection(&This->parent->lock);
+
+    if (!This->initialized)
+    {
+        hr = WINCODEC_ERR_NOTINITIALIZED;
+    }
+    else if (This->frame_created)
+    {
+        hr = WINCODEC_ERR_WRONGSTATE;
+    }
+    else
+    {
+        *pixelFormat = GUID_WICPixelFormat32bppBGRA;
+        hr = S_OK;
+    }
+
+    LeaveCriticalSection(&This->parent->lock);
+
+    return hr;
 }
 
 static HRESULT WINAPI DdsFrameEncode_SetColorContexts(IWICBitmapFrameEncode *iface,

@@ -104,7 +104,34 @@ struct file_view
     unsigned int  protect;       /* protection for all pages at allocation time and SEC_* flags */
 };
 
-#define __EXCEPT_SYSCALL __EXCEPT_HANDLER(0)
+#undef __TRY
+#undef __EXCEPT
+#undef __ENDTRY
+
+#define __TRY \
+    do { __wine_jmp_buf __jmp; \
+         int __first = 1; \
+         assert( !ntdll_get_thread_data()->jmp_buf ); \
+         for (;;) if (!__first) \
+         { \
+             do {
+
+#define __EXCEPT \
+             } while(0); \
+             ntdll_get_thread_data()->jmp_buf = NULL; \
+             break; \
+         } else { \
+             if (__wine_setjmpex( &__jmp, NULL )) { \
+                 do {
+
+#define __ENDTRY \
+                 } while (0); \
+                 break; \
+             } \
+             ntdll_get_thread_data()->jmp_buf = &__jmp; \
+             __first = 0; \
+         } \
+    } while (0);
 
 /* per-page protection flags */
 #define VPROT_READ       0x01
@@ -2661,7 +2688,7 @@ void virtual_init(void)
  */
 ULONG_PTR get_system_affinity_mask(void)
 {
-    ULONG num_cpus = NtCurrentTeb()->Peb->NumberOfProcessors;
+    ULONG num_cpus = peb->NumberOfProcessors;
     if (num_cpus >= sizeof(ULONG_PTR) * 8) return ~(ULONG_PTR)0;
     return ((ULONG_PTR)1 << num_cpus) - 1;
 }
@@ -2696,7 +2723,7 @@ void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info )
     info->LowestUserAddress       = (void *)0x10000;
     info->HighestUserAddress      = (char *)user_space_limit - 1;
     info->ActiveProcessorsAffinityMask = get_system_affinity_mask();
-    info->NumberOfProcessors      = NtCurrentTeb()->Peb->NumberOfProcessors;
+    info->NumberOfProcessors      = peb->NumberOfProcessors;
 }
 
 
@@ -2813,7 +2840,7 @@ NTSTATUS virtual_create_builtin_view( void *module, const UNICODE_STRING *nt_nam
 
 
 /* set some initial values in a new TEB */
-static TEB *init_teb( void *ptr, PEB *peb, BOOL is_wow )
+static TEB *init_teb( void *ptr, BOOL is_wow )
 {
     struct ntdll_thread_data *thread_data;
     TEB *teb;
@@ -2875,8 +2902,6 @@ static TEB *init_teb( void *ptr, PEB *peb, BOOL is_wow )
  */
 TEB *virtual_alloc_first_teb(void)
 {
-    TEB *teb;
-    PEB *peb;
     void *ptr;
     NTSTATUS status;
     SIZE_T data_size = page_size;
@@ -2899,9 +2924,7 @@ TEB *virtual_alloc_first_teb(void)
     data_size = 2 * block_size;
     NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&ptr, 0, &data_size, MEM_COMMIT, PAGE_READWRITE );
     peb = (PEB *)((char *)teb_block + 31 * block_size + (is_win64 ? 0 : page_size));
-    teb = init_teb( ptr, peb, FALSE );
-    *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
-    return teb;
+    return init_teb( ptr, FALSE );
 }
 
 
@@ -2942,7 +2965,7 @@ NTSTATUS virtual_alloc_teb( TEB **ret_teb )
         NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&ptr, 0, &block_size,
                                  MEM_COMMIT, PAGE_READWRITE );
     }
-    *ret_teb = teb = init_teb( ptr, NtCurrentTeb()->Peb, !!NtCurrentTeb()->WowTebOffset );
+    *ret_teb = teb = init_teb( ptr, !!NtCurrentTeb()->WowTebOffset );
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
 
     if ((status = signal_alloc_thread( teb )))
@@ -2972,10 +2995,10 @@ void virtual_free_teb( TEB *teb )
         size = 0;
         NtFreeVirtualMemory( GetCurrentProcess(), &teb->DeallocationStack, &size, MEM_RELEASE );
     }
-    if (thread_data->start_stack)
+    if (thread_data->kernel_stack)
     {
         size = 0;
-        NtFreeVirtualMemory( GetCurrentProcess(), &thread_data->start_stack, &size, MEM_RELEASE );
+        NtFreeVirtualMemory( GetCurrentProcess(), &thread_data->kernel_stack, &size, MEM_RELEASE );
     }
     if (teb->WowTebOffset)
     {
@@ -3023,8 +3046,7 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
     else
     {
         index -= TLS_MINIMUM_AVAILABLE;
-        if (index >= 8 * sizeof(NtCurrentTeb()->Peb->TlsExpansionBitmapBits))
-            return STATUS_INVALID_PARAMETER;
+        if (index >= 8 * sizeof(peb->TlsExpansionBitmapBits)) return STATUS_INVALID_PARAMETER;
 
         server_enter_uninterrupted_section( &virtual_mutex, &sigset );
         LIST_FOR_EACH_ENTRY( thread_data, &teb_list, struct ntdll_thread_data, entry )
@@ -3042,12 +3064,12 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
  *           virtual_alloc_thread_stack
  */
 NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR zero_bits, SIZE_T reserve_size,
-                                     SIZE_T commit_size, SIZE_T *pthread_size )
+                                     SIZE_T commit_size, SIZE_T extra_size )
 {
     struct file_view *view;
     NTSTATUS status;
     sigset_t sigset;
-    SIZE_T size, extra_size = 0;
+    SIZE_T size;
 
     if (!reserve_size) reserve_size = main_image_info.MaximumStackSize;
     if (!commit_size) commit_size = main_image_info.CommittedStackSize;
@@ -3055,7 +3077,6 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR zero_bits, SI
     size = max( reserve_size, commit_size );
     if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
     size = (size + 0xffff) & ~0xffff;  /* round to 64K boundary */
-    if (pthread_size) *pthread_size = extra_size = max( page_size, ROUND_SIZE( 0, *pthread_size ));
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
 
@@ -3428,7 +3449,7 @@ BOOL virtual_check_buffer_for_read( const void *ptr, SIZE_T size )
         dummy = p[0];
         dummy = p[count - 1];
     }
-    __EXCEPT_SYSCALL
+    __EXCEPT
     {
         return FALSE;
     }
@@ -3461,7 +3482,7 @@ BOOL virtual_check_buffer_for_write( void *ptr, SIZE_T size )
         p[0] |= 0;
         p[count - 1] |= 0;
     }
-    __EXCEPT_SYSCALL
+    __EXCEPT
     {
         return FALSE;
     }
@@ -3629,7 +3650,7 @@ void CDECL virtual_release_address_space(void)
 void virtual_set_large_address_space(void)
 {
     /* no large address space on win9x */
-    if (NtCurrentTeb()->Peb->OSPlatformId != VER_PLATFORM_WIN32_NT) return;
+    if (peb->OSPlatformId != VER_PLATFORM_WIN32_NT) return;
 
     user_space_limit = working_set_limit = address_space_limit;
 }

@@ -404,9 +404,9 @@ static void dump_rawinput( const char *prefix, const union rawinput *rawinput )
                  rawinput->kbd.message, rawinput->kbd.vkey, rawinput->kbd.scan );
         break;
     case RIM_TYPEHID:
-        fprintf( stderr, "%s{type=HID,device=%04x,param=%04x,page=%04hx,usage=%04hx}",
+        fprintf( stderr, "%s{type=HID,device=%04x,param=%04x,page=%04hx,usage=%04hx,count=%u,length=%u}",
                  prefix, rawinput->hid.device, rawinput->hid.param, rawinput->hid.usage_page,
-                 rawinput->hid.usage );
+                 rawinput->hid.usage, rawinput->hid.count, rawinput->hid.length );
         break;
     default:
         fprintf( stderr, "%s{type=%04x}", prefix, rawinput->type );
@@ -436,6 +436,7 @@ static void dump_hw_input( const char *prefix, const hw_input_t *input )
         dump_uint64( ",lparam=", &input->hw.lparam );
         switch (input->hw.msg)
         {
+        case WM_INPUT:
         case WM_INPUT_DEVICE_CHANGE:
             dump_rawinput( ",rawinput=", &input->hw.rawinput );
         }
@@ -2072,15 +2073,6 @@ static void dump_unlock_file_request( const struct unlock_file_request *req )
     dump_uint64( ", count=", &req->count );
 }
 
-static void dump_set_socket_event_request( const struct set_socket_event_request *req )
-{
-    fprintf( stderr, " handle=%04x", req->handle );
-    fprintf( stderr, ", mask=%08x", req->mask );
-    fprintf( stderr, ", event=%04x", req->event );
-    fprintf( stderr, ", window=%08x", req->window );
-    fprintf( stderr, ", msg=%08x", req->msg );
-}
-
 static void dump_get_socket_event_request( const struct get_socket_event_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -2092,7 +2084,6 @@ static void dump_get_socket_event_reply( const struct get_socket_event_reply *re
 {
     fprintf( stderr, " mask=%08x", req->mask );
     fprintf( stderr, ", pmask=%08x", req->pmask );
-    fprintf( stderr, ", state=%08x", req->state );
     dump_varargs_ints( ", errors=", cur_size );
 }
 
@@ -2106,14 +2097,6 @@ static void dump_get_socket_info_reply( const struct get_socket_info_reply *req 
     fprintf( stderr, " family=%d", req->family );
     fprintf( stderr, ", type=%d", req->type );
     fprintf( stderr, ", protocol=%d", req->protocol );
-}
-
-static void dump_enable_socket_event_request( const struct enable_socket_event_request *req )
-{
-    fprintf( stderr, " handle=%04x", req->handle );
-    fprintf( stderr, ", mask=%08x", req->mask );
-    fprintf( stderr, ", sstate=%08x", req->sstate );
-    fprintf( stderr, ", cstate=%08x", req->cstate );
 }
 
 static void dump_set_socket_deferred_request( const struct set_socket_deferred_request *req )
@@ -2726,6 +2709,7 @@ static void dump_send_hardware_message_request( const struct send_hardware_messa
     fprintf( stderr, " win=%08x", req->win );
     dump_hw_input( ", input=", &req->input );
     fprintf( stderr, ", flags=%08x", req->flags );
+    dump_varargs_bytes( ", report=", cur_size );
 }
 
 static void dump_send_hardware_message_reply( const struct send_hardware_message_reply *req )
@@ -4605,10 +4589,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] = {
     (dump_func)dump_get_volume_info_request,
     (dump_func)dump_lock_file_request,
     (dump_func)dump_unlock_file_request,
-    (dump_func)dump_set_socket_event_request,
     (dump_func)dump_get_socket_event_request,
     (dump_func)dump_get_socket_info_request,
-    (dump_func)dump_enable_socket_event_request,
     (dump_func)dump_set_socket_deferred_request,
     (dump_func)dump_recv_socket_request,
     (dump_func)dump_poll_socket_request,
@@ -4885,10 +4867,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] = {
     (dump_func)dump_get_volume_info_reply,
     (dump_func)dump_lock_file_reply,
     NULL,
-    NULL,
     (dump_func)dump_get_socket_event_reply,
     (dump_func)dump_get_socket_info_reply,
-    NULL,
     NULL,
     (dump_func)dump_recv_socket_reply,
     (dump_func)dump_poll_socket_reply,
@@ -5165,10 +5145,8 @@ static const char * const req_names[REQ_NB_REQUESTS] = {
     "get_volume_info",
     "lock_file",
     "unlock_file",
-    "set_socket_event",
     "get_socket_event",
     "get_socket_info",
-    "enable_socket_event",
     "set_socket_deferred",
     "recv_socket",
     "poll_socket",
@@ -5400,6 +5378,7 @@ static const struct
     { "ABANDONED_WAIT_0",            STATUS_ABANDONED_WAIT_0 },
     { "ACCESS_DENIED",               STATUS_ACCESS_DENIED },
     { "ACCESS_VIOLATION",            STATUS_ACCESS_VIOLATION },
+    { "ADDRESS_ALREADY_ASSOCIATED",  STATUS_ADDRESS_ALREADY_ASSOCIATED },
     { "ALERTED",                     STATUS_ALERTED },
     { "BAD_DEVICE_TYPE",             STATUS_BAD_DEVICE_TYPE },
     { "BAD_IMPERSONATION_LEVEL",     STATUS_BAD_IMPERSONATION_LEVEL },
@@ -5444,6 +5423,7 @@ static const struct
     { "INSTANCE_NOT_AVAILABLE",      STATUS_INSTANCE_NOT_AVAILABLE },
     { "INSUFFICIENT_RESOURCES",      STATUS_INSUFFICIENT_RESOURCES },
     { "INVALID_ADDRESS",             STATUS_INVALID_ADDRESS },
+    { "INVALID_ADDRESS_COMPONENT",   STATUS_INVALID_ADDRESS_COMPONENT },
     { "INVALID_CID",                 STATUS_INVALID_CID },
     { "INVALID_CONNECTION",          STATUS_INVALID_CONNECTION },
     { "INVALID_DEVICE_REQUEST",      STATUS_INVALID_DEVICE_REQUEST },
